@@ -3,6 +3,7 @@
 
 """Unit tests for k8s module."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,12 +11,12 @@ import pytest
 
 from production_test_framework.config import LGTMConfig
 from production_test_framework.k8s import (
-    Node,
-    Pod,
     KubectlPortForwarder,
     KubernetesClient,
     LocalKubectlPortForwarder,
     LocalPortForward,
+    Node,
+    Pod,
 )
 from production_test_framework.ssh import CommandResult
 
@@ -76,8 +77,7 @@ class TestKubernetesClient:
     def test_get_nodes_parses_output(self, k8s_client, mock_ssh):
         mock_ssh.run_kubectl.return_value = CommandResult(
             returncode=0,
-            stdout="node1   Ready   control-plane   1.28   192.168.1.1\n"
-            "node2   Ready   <none>   1.28   192.168.1.2\n",
+            stdout="node1   Ready   control-plane   1.28   192.168.1.1\nnode2   Ready   <none>   1.28   192.168.1.2\n",
             stderr="",
         )
 
@@ -87,7 +87,7 @@ class TestKubernetesClient:
         assert len(nodes) == 2
         assert nodes[0].name == "node1"
         assert nodes[0].status == "Ready"
-        assert nodes[0].internal_ip == None
+        assert nodes[0].internal_ip is None
         assert nodes[1].name == "node2"
 
     def test_get_node_count(self, k8s_client, mock_ssh):
@@ -117,8 +117,7 @@ class TestKubernetesClient:
     def test_get_pods_all_namespaces(self, k8s_client, mock_ssh):
         mock_ssh.run_kubectl.return_value = CommandResult(
             returncode=0,
-            stdout="default   pod1  1/1   Running   0   5m\n"
-            "kube-system   coredns  2/2   Running   0   10m\n",
+            stdout="default   pod1  1/1   Running   0   5m\nkube-system   coredns  2/2   Running   0   10m\n",
             stderr="",
         )
 
@@ -257,6 +256,340 @@ class TestKubernetesClient:
         assert result is True
         mock_ssh.run_kubectl.assert_called_once()
         assert mock_ssh.run_kubectl.call_args[1]["stdin_data"] == "apiVersion: v1\nkind: ConfigMap\n"
+
+
+class TestKubernetesClientWorkloadState:
+    """Tests for the pod, workload, PVC and endpoint readers with mocked SSH."""
+
+    @pytest.fixture
+    def mock_ssh(self):
+        ssh = MagicMock()
+        ssh.run_kubectl = MagicMock()
+        return ssh
+
+    @pytest.fixture
+    def k8s_client(self, lgtm_config, mock_ssh):
+        return KubernetesClient(lgtm_config, ssh=mock_ssh)
+
+    # -------------------------------------------------------------------------
+    # pods_by_selector
+    # -------------------------------------------------------------------------
+
+    def test_pods_by_selector_parses_uid_and_readiness(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(
+            returncode=0,
+            stdout="loki-write-0=uid-a=true true;loki-write-1=uid-b=true false;",
+            stderr="",
+        )
+
+        pods = k8s_client.pods_by_selector("lgtma", "app=loki")
+
+        assert pods == {"loki-write-0": ("uid-a", True), "loki-write-1": ("uid-b", False)}
+
+    def test_pods_by_selector_marks_pod_without_containers_not_ready(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout="loki-write-0=uid-a=;", stderr="")
+        assert k8s_client.pods_by_selector("lgtma", "app=loki") == {"loki-write-0": ("uid-a", False)}
+
+    def test_pods_by_selector_empty_when_kubectl_fails(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=1, stdout="", stderr="boom")
+        assert k8s_client.pods_by_selector("lgtma", "app=loki") == {}
+
+    # -------------------------------------------------------------------------
+    # pod_containers
+    # -------------------------------------------------------------------------
+
+    def test_pod_containers_parses_container_names(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(
+            returncode=0,
+            stdout="grafana-0=grafana sc-dashboard sc-alert;loki-gateway-0=nginx;",
+            stderr="",
+        )
+
+        pods, result = k8s_client.pod_containers("lgtma", "app=grafana")
+
+        assert result.success is True
+        assert pods == {"grafana-0": {"grafana", "sc-dashboard", "sc-alert"}, "loki-gateway-0": {"nginx"}}
+
+    def test_pod_containers_empty_when_kubectl_fails(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=1, stdout="", stderr="boom")
+
+        pods, result = k8s_client.pod_containers("lgtma", "app=grafana")
+
+        assert pods == {}
+        assert result.success is False
+
+    # -------------------------------------------------------------------------
+    # pod_metrics
+    # -------------------------------------------------------------------------
+
+    def test_pod_metrics_reads_through_the_api_server_proxy(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout="up 1\n", stderr="")
+
+        metrics, result = k8s_client.pod_metrics("lgtma", "loki-write-0", 3100)
+
+        assert result.success is True
+        assert metrics == "up 1\n"
+        assert mock_ssh.run_kubectl.call_args[0][0] == (
+            "get --raw /api/v1/namespaces/lgtma/pods/loki-write-0:3100/proxy/metrics"
+        )
+
+    def test_pod_metrics_reports_failure(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=1, stdout="", stderr="no route to pod")
+
+        metrics, result = k8s_client.pod_metrics("lgtma", "loki-write-0", 3100)
+
+        assert metrics == ""
+        assert result.success is False
+        assert result.stderr == "no route to pod"
+
+    # -------------------------------------------------------------------------
+    # workload_readiness
+    # -------------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "kind,field",
+        [("deployment", ".spec.replicas"), ("statefulset", ".spec.replicas"), ("daemonset", ".status.numberReady")],
+    )
+    def test_workload_readiness_uses_the_fields_of_each_kind(self, k8s_client, mock_ssh, kind, field):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout="3,3,3", stderr="")
+
+        counts, result = k8s_client.workload_readiness("lgtma", kind, "loki-read")
+
+        assert result.success is True
+        assert counts == (3, 3, 3)
+        assert field in mock_ssh.run_kubectl.call_args[0][0]
+
+    def test_workload_readiness_treats_absent_counts_as_zero(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout="2,,", stderr="")
+        assert k8s_client.workload_readiness("lgtma", "deployment", "loki-read")[0] == (2, 0, 0)
+
+    def test_workload_readiness_rejects_unknown_kind_without_calling_kubectl(self, k8s_client, mock_ssh):
+        counts, result = k8s_client.workload_readiness("lgtma", "cronjob", "loki-read")
+
+        assert counts == (0, 0, 0)
+        assert result.success is False
+        assert "cronjob" in result.stderr
+        mock_ssh.run_kubectl.assert_not_called()
+
+    def test_workload_readiness_reports_unexpected_output(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout="3,3", stderr="")
+
+        counts, result = k8s_client.workload_readiness("lgtma", "deployment", "loki-read")
+
+        assert counts == (0, 0, 0)
+        assert result.success is False
+
+    def test_workload_readiness_reports_kubectl_failure(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=1, stdout="", stderr="not found")
+
+        counts, result = k8s_client.workload_readiness("lgtma", "deployment", "missing")
+
+        assert counts == (0, 0, 0)
+        assert result.stderr == "not found"
+
+    # -------------------------------------------------------------------------
+    # pvc_phase
+    # -------------------------------------------------------------------------
+
+    def test_pvc_phase_returns_phase(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout="Bound", stderr="")
+
+        phase, result = k8s_client.pvc_phase("lgtma", "storage-loki-write-0")
+
+        assert result.success is True
+        assert phase == "Bound"
+
+    def test_pvc_phase_reports_failure(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=1, stdout="", stderr="not found")
+
+        phase, result = k8s_client.pvc_phase("lgtma", "missing")
+
+        assert phase == ""
+        assert result.success is False
+
+    # -------------------------------------------------------------------------
+    # service_endpoint_addresses
+    # -------------------------------------------------------------------------
+
+    def test_service_endpoint_addresses_reads_endpointslices(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout="10.42.0.5 10.42.1.7", stderr="")
+
+        addresses = k8s_client.service_endpoint_addresses("lgtma", "loki-gateway")
+
+        assert addresses == ["10.42.0.5", "10.42.1.7"]
+        assert "endpointslices" in mock_ssh.run_kubectl.call_args[0][0]
+        assert "kubernetes.io/service-name=loki-gateway" in mock_ssh.run_kubectl.call_args[0][0]
+
+    def test_service_endpoint_addresses_empty_when_kubectl_fails(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=1, stdout="", stderr="boom")
+        assert k8s_client.service_endpoint_addresses("lgtma", "loki-gateway") == []
+
+    # -------------------------------------------------------------------------
+    # unstable_pods
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _pod_json(*, name, started_at, restarts, finished_at=None, reason="Error"):
+        status = {"name": "loki", "restartCount": restarts}
+        if finished_at is not None:
+            status["lastState"] = {"terminated": {"finishedAt": finished_at, "reason": reason}}
+        return {
+            "metadata": {"name": name},
+            "status": {"startTime": started_at, "containerStatuses": [status]},
+        }
+
+    def _pods_result(self, *pods):
+        return CommandResult(returncode=0, stdout=json.dumps({"items": list(pods)}), stderr="")
+
+    def test_unstable_pods_empty_when_nothing_restarted(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = self._pods_result(
+            self._pod_json(name="loki-write-0", started_at="2026-08-18T10:00:00Z", restarts=0)
+        )
+
+        unstable, result = k8s_client.unstable_pods("lgtma")
+
+        assert result.success is True
+        assert unstable == []
+
+    def test_unstable_pods_tolerates_restarts_inside_the_grace_window(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = self._pods_result(
+            self._pod_json(
+                name="mimir-ingester-zone-a-0",
+                started_at="2026-08-18T10:00:00Z",
+                restarts=3,
+                finished_at="2026-08-18T10:01:00Z",
+            )
+        )
+
+        unstable, _ = k8s_client.unstable_pods("lgtma")
+
+        assert unstable == []
+
+    def test_unstable_pods_flags_a_restart_after_the_grace_window(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = self._pods_result(
+            self._pod_json(
+                name="loki-write-0",
+                started_at="2026-08-18T10:00:00Z",
+                restarts=1,
+                finished_at="2026-08-18T11:00:00Z",
+                reason="OOMKilled",
+            )
+        )
+
+        unstable, _ = k8s_client.unstable_pods("lgtma")
+
+        assert len(unstable) == 1
+        assert "loki-write-0/loki" in unstable[0]
+        assert "OOMKilled" in unstable[0]
+
+    def test_unstable_pods_flags_a_count_over_the_ceiling(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = self._pods_result(
+            self._pod_json(
+                name="loki-write-0",
+                started_at="2026-08-18T10:00:00Z",
+                restarts=11,
+                finished_at="2026-08-18T10:01:00Z",
+            )
+        )
+
+        unstable, _ = k8s_client.unstable_pods("lgtma")
+
+        assert len(unstable) == 1
+        assert "over the 10 ceiling" in unstable[0]
+
+    def test_unstable_pods_honours_the_name_prefix(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = self._pods_result(
+            self._pod_json(
+                name="tempo-ingester-0",
+                started_at="2026-08-18T10:00:00Z",
+                restarts=1,
+                finished_at="2026-08-18T11:00:00Z",
+            )
+        )
+
+        assert k8s_client.unstable_pods("lgtma", name_prefix="loki")[0] == []
+        assert k8s_client.unstable_pods("lgtma", name_prefix="tempo")[0] != []
+
+    def test_unstable_pods_reports_kubectl_failure(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=1, stdout="", stderr="boom")
+
+        unstable, result = k8s_client.unstable_pods("lgtma")
+
+        assert unstable == []
+        assert result.success is False
+
+    # -------------------------------------------------------------------------
+    # restart_pods
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _kubectl_router(list_results, delete_result):
+        """Answer pod listings from a queue and the delete with a fixed result."""
+        listings = iter(list_results)
+
+        def route(args, **kwargs):
+            if args.startswith("delete pods"):
+                return delete_result
+            return next(listings)
+
+        return route
+
+    def test_restart_pods_waits_for_new_uids_to_be_ready(self, k8s_client, mock_ssh):
+        before = CommandResult(returncode=0, stdout="loki-write-0=uid-old=true;", stderr="")
+        replaced = CommandResult(returncode=0, stdout="loki-write-0=uid-new=true;", stderr="")
+        mock_ssh.run_kubectl.side_effect = self._kubectl_router(
+            [before, replaced, replaced], CommandResult(returncode=0, stdout="deleted", stderr="")
+        )
+
+        pods, result = k8s_client.restart_pods("lgtma", "app=loki", timeout=1.0, interval=0.01)
+
+        assert result.success is True
+        assert pods == {"loki-write-0": ("uid-new", True)}
+
+    def test_restart_pods_sends_sigkill_when_not_graceful(self, k8s_client, mock_ssh):
+        before = CommandResult(returncode=0, stdout="loki-write-0=uid-old=true;", stderr="")
+        replaced = CommandResult(returncode=0, stdout="loki-write-0=uid-new=true;", stderr="")
+        mock_ssh.run_kubectl.side_effect = self._kubectl_router(
+            [before, replaced, replaced], CommandResult(returncode=0, stdout="deleted", stderr="")
+        )
+
+        k8s_client.restart_pods("lgtma", "app=loki", graceful=False, timeout=1.0, interval=0.01)
+
+        delete_args = [call[0][0] for call in mock_ssh.run_kubectl.call_args_list if call[0][0].startswith("delete")]
+        assert delete_args == ["delete pods -n lgtma -l app=loki --wait=false --grace-period=0 --force"]
+
+    def test_restart_pods_reports_when_the_selector_matches_nothing(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout="", stderr="")
+
+        pods, result = k8s_client.restart_pods("lgtma", "app=loki")
+
+        assert pods == {}
+        assert result.success is False
+        assert "No pods matching app=loki" in result.stderr
+
+    def test_restart_pods_reports_a_failed_delete(self, k8s_client, mock_ssh):
+        before = CommandResult(returncode=0, stdout="loki-write-0=uid-old=true;", stderr="")
+        mock_ssh.run_kubectl.side_effect = self._kubectl_router(
+            [before], CommandResult(returncode=1, stdout="", stderr="forbidden")
+        )
+
+        pods, result = k8s_client.restart_pods("lgtma", "app=loki")
+
+        assert pods == {}
+        assert result.stderr == "forbidden"
+
+    def test_restart_pods_reports_replacements_that_never_became_ready(self, k8s_client, mock_ssh):
+        before = CommandResult(returncode=0, stdout="loki-write-0=uid-old=true;", stderr="")
+        not_ready = CommandResult(returncode=0, stdout="loki-write-0=uid-new=false;", stderr="")
+        mock_ssh.run_kubectl.side_effect = self._kubectl_router(
+            [before] + [not_ready] * 20, CommandResult(returncode=0, stdout="deleted", stderr="")
+        )
+
+        pods, result = k8s_client.restart_pods("lgtma", "app=loki", timeout=0.05, interval=0.01)
+
+        assert result.success is False
+        assert "were not ready" in result.stderr
+        assert pods == {"loki-write-0": ("uid-new", False)}
 
 
 class TestKubernetesClientLocalhost:

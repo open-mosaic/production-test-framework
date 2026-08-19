@@ -8,18 +8,31 @@ Provides high-level interfaces for interacting with Kubernetes clusters,
 with support for both local kubectl and remote k3s kubectl via SSH.
 """
 
+import json
 import shlex
+import socket
 import subprocess
 import threading
 import time
-import socket
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 from production_test_framework.config import LGTMConfig
 from production_test_framework.helper import is_localhost, poll_until, run_command
-from production_test_framework.ssh import SSHExecutor, CommandResult
+from production_test_framework.ssh import CommandResult, SSHExecutor
+
+WORKLOAD_READINESS_JSONPATH = {
+    "deployment": "{.spec.replicas},{.status.readyReplicas},{.status.availableReplicas}",
+    "statefulset": "{.spec.replicas},{.status.readyReplicas},{.status.availableReplicas}",
+    "daemonset": "{.status.desiredNumberScheduled},{.status.numberReady},{.status.numberAvailable}",
+}
+
+POD_RESTART_TIMEOUT_S = 300.0
+POD_RESTART_INTERVAL_S = 5.0
+
+STARTUP_RESTART_GRACE_S = 5 * 60
+MAX_POD_RESTARTS = 10
 
 
 @dataclass
@@ -30,7 +43,7 @@ class Node:
     status: str
     roles: str
     version: str
-    internal_ip: Optional[str] = None
+    internal_ip: str | None = None
 
     @property
     def is_ready(self) -> bool:
@@ -73,7 +86,7 @@ class KubernetesClient:
     Otherwise executes kubectl on the remote host via SSH.
     """
 
-    def __init__(self, config: LGTMConfig, ssh: Optional[SSHExecutor] = None):
+    def __init__(self, config: LGTMConfig, ssh: SSHExecutor | None = None):
         self.config = config
         self.ssh = ssh or SSHExecutor(config)
 
@@ -82,7 +95,7 @@ class KubernetesClient:
         args: str,
         timeout: int = 60,
         kubeconfig: str = "~/.kube/config",
-        stdin_data: Optional[str] = None,
+        stdin_data: str | None = None,
     ) -> CommandResult:
         """Run kubectl on the local machine."""
         kube_path = str(Path(kubeconfig).expanduser())
@@ -92,7 +105,7 @@ class KubernetesClient:
             return CommandResult(returncode=-1, stdout="", stderr=f"Invalid kubectl args: {e}")
         return run_command(cmd, timeout=timeout, stdin_data=stdin_data)
 
-    def _run_kubectl(self, args: str, timeout: int = 60, stdin_data: Optional[str] = None) -> CommandResult:
+    def _run_kubectl(self, args: str, timeout: int = 60, stdin_data: str | None = None) -> CommandResult:
         """Execute kubectl on localhost or on the remote host via SSH."""
         if is_localhost(self.config.host):
             return self._run_kubectl_local(args, timeout=timeout, stdin_data=stdin_data)
@@ -102,7 +115,7 @@ class KubernetesClient:
     # Node Operations
     # -------------------------------------------------------------------------
 
-    def get_nodes(self) -> Tuple[List[Node], CommandResult]:
+    def get_nodes(self) -> tuple[list[Node], CommandResult]:
         """
         Get all nodes in the cluster.
 
@@ -144,9 +157,7 @@ class KubernetesClient:
     # Pod Operations
     # -------------------------------------------------------------------------
 
-    def get_pods(
-        self, namespace: Optional[str] = None, all_namespaces: bool = False
-    ) -> Tuple[List[Pod], CommandResult]:
+    def get_pods(self, namespace: str | None = None, all_namespaces: bool = False) -> tuple[list[Pod], CommandResult]:
         """
         Get pods in the cluster.
 
@@ -200,7 +211,7 @@ class KubernetesClient:
 
         return pods, result
 
-    def get_pods_in_namespace(self, namespace: str) -> List[Pod]:
+    def get_pods_in_namespace(self, namespace: str) -> list[Pod]:
         """Get all pods in a specific namespace."""
         pods, _ = self.get_pods(namespace=namespace)
         return pods
@@ -221,11 +232,187 @@ class KubernetesClient:
         result = self._run_kubectl(cmd, timeout=timeout + 10)
         return result.success
 
+    def pods_by_selector(self, namespace: str, selector: str) -> dict[str, tuple[str, bool]]:
+        """
+        Get {pod name: (uid, all containers ready)} for a label selector.
+        """
+        result = self._run_kubectl(
+            f"get pods -n {namespace} -l {selector} -o jsonpath="
+            "'{range .items[*]}{.metadata.name}={.metadata.uid}={.status.containerStatuses[*].ready};{end}'"
+        )
+        if not result.success:
+            return {}
+
+        pods: dict[str, tuple[str, bool]] = {}
+        for entry in result.stdout.split(";"):
+            if not entry.strip():
+                continue
+            name, uid, readiness = entry.split("=", 2)
+            flags = readiness.split()
+            pods[name] = (uid, bool(flags) and all(flag == "true" for flag in flags))
+        return pods
+
+    def pod_containers(self, namespace: str, selector: str) -> tuple[dict[str, set[str]], CommandResult]:
+        """
+        Get the container names of every pod matching a label selector.
+        """
+        result = self._run_kubectl(
+            f"get pods -n {namespace} -l {selector} "
+            "-o jsonpath='{range .items[*]}{.metadata.name}={.spec.containers[*].name};{end}'"
+        )
+        if not result.success:
+            return {}, result
+
+        pods: dict[str, set[str]] = {}
+        for entry in result.stdout.split(";"):
+            if not entry.strip():
+                continue
+            name, containers = entry.split("=", 1)
+            pods[name] = set(containers.split())
+        return pods, result
+
+    def pod_metrics(self, namespace: str, pod: str, port: int) -> tuple[str, CommandResult]:
+        """
+        Get one pod's Prometheus text, fetched through the API server proxy.
+        """
+        result = self._run_kubectl(f"get --raw /api/v1/namespaces/{namespace}/pods/{pod}:{port}/proxy/metrics")
+        return result.stdout, result
+
+    def unstable_pods(
+        self,
+        namespace: str,
+        *,
+        name_prefix: str = "",
+        max_restarts: int = MAX_POD_RESTARTS,
+        startup_grace_s: float = STARTUP_RESTART_GRACE_S,
+    ) -> tuple[list[str], CommandResult]:
+        """
+        Describe every pod that looks unstable, empty when all are healthy.
+
+        A pod counts as unstable when it last terminated more than
+        startup_grace_s into its pod's life, or when it has restarted more than
+        max_restarts times whenever those happened.
+        """
+        result = self._run_kubectl(f"get pods -n {namespace} -o json")
+        if not result.success:
+            return [], result
+
+        unstable: list[str] = []
+
+        for pod in json.loads(result.stdout).get("items", []):
+            name = pod["metadata"]["name"]
+            if not name.startswith(name_prefix):
+                continue
+
+            pod_started_at = pod.get("status", {}).get("startTime")
+            pod_started = datetime.fromisoformat(pod_started_at) if pod_started_at else None
+
+            for status in pod.get("status", {}).get("containerStatuses", []):
+                restarts = status.get("restartCount", 0)
+                if restarts == 0:
+                    continue
+
+                terminated = status.get("lastState", {}).get("terminated") or {}
+                finished_at = terminated.get("finishedAt")
+                into_life_s = (
+                    (datetime.fromisoformat(finished_at) - pod_started).total_seconds()
+                    if finished_at and pod_started
+                    else None
+                )
+
+                if into_life_s is not None and into_life_s > startup_grace_s:
+                    unstable.append(
+                        f"{name}/{status['name']} restarted {restarts}x, last {into_life_s / 60:.0f}m "
+                        f"after the pod started ({terminated.get('reason', 'unknown')})"
+                    )
+                elif restarts > max_restarts:
+                    unstable.append(f"{name}/{status['name']} restarted {restarts}x, over the {max_restarts} ceiling")
+
+        return unstable, result
+
+    def restart_pods(
+        self,
+        namespace: str,
+        selector: str,
+        *,
+        graceful: bool = True,
+        timeout: float = POD_RESTART_TIMEOUT_S,
+        interval: float = POD_RESTART_INTERVAL_S,
+    ) -> tuple[dict[str, tuple[str, bool]], CommandResult]:
+        """
+        Delete the pods matching a selector and wait for replacements to be ready.
+        """
+        before = self.pods_by_selector(namespace, selector)
+        if not before:
+            return {}, CommandResult(
+                returncode=-1,
+                stdout="",
+                stderr=f"No pods matching {selector} found in {namespace} to restart",
+            )
+
+        flags = "--wait=false" if graceful else "--wait=false --grace-period=0 --force"
+        result = self._run_kubectl(f"delete pods -n {namespace} -l {selector} {flags}")
+        if not result.success:
+            return {}, result
+
+        old_uids = {uid for uid, _ in before.values()}
+
+        def replaced() -> bool:
+            current = self.pods_by_selector(namespace, selector)
+            if len(current) < len(before):
+                return False
+            return all(uid not in old_uids and ready for uid, ready in current.values())
+
+        if not poll_until(replaced, timeout=timeout, interval=interval):
+            current = self.pods_by_selector(namespace, selector)
+            return current, CommandResult(
+                returncode=-1,
+                stdout=result.stdout,
+                stderr=(
+                    f"Pods matching {selector} in {namespace} were not ready "
+                    f"within {timeout:.0f}s of deletion: {current}"
+                ),
+            )
+
+        return self.pods_by_selector(namespace, selector), result
+
+    # -------------------------------------------------------------------------
+    # Workload Operations
+    # -------------------------------------------------------------------------
+
+    def workload_readiness(self, namespace: str, kind: str, name: str) -> tuple[tuple[int, int, int], CommandResult]:
+        """
+        Get the (desired, ready, available) replica counts of a workload.
+
+        Args:
+            namespace: Namespace holding the workload.
+            kind: One of deployment, statefulset or daemonset.
+            name: Workload name.
+        """
+        jsonpath = WORKLOAD_READINESS_JSONPATH.get(kind)
+        if jsonpath is None:
+            return (0, 0, 0), CommandResult(returncode=-1, stdout="", stderr=f"Unsupported workload kind {kind!r}")
+
+        result = self._run_kubectl(f"get {kind} {name} -n {namespace} -o jsonpath='{jsonpath}'")
+        if not result.success:
+            return (0, 0, 0), result
+
+        fields = result.stdout.split(",")
+        if len(fields) != 3:
+            return (0, 0, 0), CommandResult(
+                returncode=-1,
+                stdout=result.stdout,
+                stderr=f"Unexpected readiness output for {kind} {name}: {result.stdout!r}",
+            )
+
+        desired, ready, available = (int(field) if field else 0 for field in fields)
+        return (desired, ready, available), result
+
     # -------------------------------------------------------------------------
     # Namespace Operations
     # -------------------------------------------------------------------------
 
-    def get_namespaces(self) -> Tuple[List[str], CommandResult]:
+    def get_namespaces(self) -> tuple[list[str], CommandResult]:
         """Get all namespaces in the cluster."""
         result = self._run_kubectl("get namespaces --no-headers -o custom-columns=NAME:.metadata.name")
         namespaces = []
@@ -240,7 +427,7 @@ class KubernetesClient:
         result = self._run_kubectl(f"get namespace {namespace}")
         return result.success
 
-    def all_namespaces_exist(self, namespaces: List[str]) -> Tuple[bool, List[str]]:
+    def all_namespaces_exist(self, namespaces: list[str]) -> tuple[bool, list[str]]:
         """
         Check if all specified namespaces exist.
 
@@ -255,7 +442,7 @@ class KubernetesClient:
     # PVC Operations
     # -------------------------------------------------------------------------
 
-    def get_pvcs(self, namespace: str) -> Tuple[List[str], CommandResult]:
+    def get_pvcs(self, namespace: str) -> tuple[list[str], CommandResult]:
         """Get all PVCs in a namespace."""
         result = self._run_kubectl(f"get pvc -n {namespace} --no-headers -o custom-columns=NAME:.metadata.name")
         pvcs = []
@@ -270,6 +457,13 @@ class KubernetesClient:
         pvcs, result = self.get_pvcs(namespace)
         return result.success and len(pvcs) > 0
 
+    def pvc_phase(self, namespace: str, claim: str) -> tuple[str, CommandResult]:
+        """
+        Get the phase of a persistent volume claim
+        """
+        result = self._run_kubectl(f"get pvc {claim} -n {namespace} -o jsonpath='{{.status.phase}}'")
+        return result.stdout, result
+
     # -------------------------------------------------------------------------
     # Service Operations
     # -------------------------------------------------------------------------
@@ -279,7 +473,7 @@ class KubernetesClient:
         result = self._run_kubectl(f"get service {name} -n {namespace}")
         return result.success
 
-    def get_service_port(self, name: str, namespace: str) -> Optional[int]:
+    def get_service_port(self, name: str, namespace: str) -> int | None:
         """Get the port of a service."""
         result = self._run_kubectl(f"get service {name} -n {namespace} -o jsonpath='{{.spec.ports[0].port}}'")
         if result.success and result.stdout.isdigit():
@@ -290,6 +484,16 @@ class KubernetesClient:
         """Delete a service."""
         result = self._run_kubectl(f"delete service {name} -n {namespace}")
         return result.success
+
+    def service_endpoint_addresses(self, namespace: str, service: str) -> list[str]:
+        """
+        Get the ready endpoint addresses of a service, empty if it has none.
+        """
+        result = self._run_kubectl(
+            f"get endpointslices -n {namespace} -l kubernetes.io/service-name={service} "
+            "-o jsonpath='{.items[*].endpoints[*].addresses[*]}'"
+        )
+        return result.stdout.split() if result.success else []
 
     # -------------------------------------------------------------------------
     # Cluster Operations
@@ -364,7 +568,7 @@ class KubectlPortForwarder:
                     try:
                         local_socket.settimeout(1.0)
                         conn, addr = local_socket.accept()
-                    except socket.timeout:
+                    except TimeoutError:
                         continue
                     except Exception:
                         break
@@ -556,7 +760,7 @@ class LocalKubectlPortForwarder:
     def __init__(
         self,
         namespace: str = "default",
-        kubeconfig: Optional[str] = None,
+        kubeconfig: str | None = None,
     ):
         """
         Initialize LocalKubectlPortForwarder.
@@ -574,7 +778,7 @@ class LocalKubectlPortForwarder:
         local_port: int,
         service_name: str,
         service_port: int,
-        namespace: Optional[str] = None,
+        namespace: str | None = None,
         wait_ready: bool = True,
         ready_timeout: float = 10.0,
     ) -> bool:
@@ -648,7 +852,7 @@ class LocalKubectlPortForwarder:
         except Exception:
             return False
 
-    def stop_service_tunnel(self, service_name: str, namespace: Optional[str] = None) -> bool:
+    def stop_service_tunnel(self, service_name: str, namespace: str | None = None) -> bool:
         """
         Stop a specific port-forward by service name.
 
@@ -681,7 +885,7 @@ class LocalKubectlPortForwarder:
                 fwd.process.kill()
         self._forwards.clear()
 
-    def is_running(self, service_name: str, namespace: Optional[str] = None) -> bool:
+    def is_running(self, service_name: str, namespace: str | None = None) -> bool:
         """
         Check if a port-forward is running for a service.
 
@@ -698,7 +902,7 @@ class LocalKubectlPortForwarder:
                 return fwd.process.poll() is None
         return False
 
-    def get_local_port(self, service_name: str, namespace: Optional[str] = None) -> Optional[int]:
+    def get_local_port(self, service_name: str, namespace: str | None = None) -> int | None:
         """
         Get the local port for a service's port-forward.
 
