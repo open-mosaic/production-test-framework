@@ -3,26 +3,23 @@
 
 """Unit tests for helper module."""
 
-import socket
 import threading
 import time
 from unittest.mock import MagicMock, patch
 
-from production_test_framework.ssh import CommandResult
 from production_test_framework.helper import (
     check_tcp_connectivity,
     get_mimir_base_url,
-    get_loki_base_url,
     is_localhost,
     ping,
     poll_until,
-    query_loki,
     query_mimir,
     run_cancellable_command,
     run_command,
     wait_for_ping,
     wait_for_tcp_connectivity,
 )
+from production_test_framework.ssh import CommandResult
 
 
 class TestRunCommand:
@@ -154,7 +151,7 @@ class TestCheckTcpConnectivity:
 
     def test_connectivity_socket_error(self):
         with patch("production_test_framework.helper.socket.socket") as mock_socket_cls:
-            mock_socket_cls.side_effect = socket.error("connection refused")
+            mock_socket_cls.side_effect = OSError("connection refused")
 
             result = check_tcp_connectivity("badhost", 9999)
 
@@ -315,28 +312,3 @@ class TestQueryMimir:
             params=None,
             timeout=10,
         )
-
-
-class TestGetLokiBaseUrl:
-    """Tests for get_loki_base_url."""
-
-    def test_returns_correct_url(self):
-        assert get_loki_base_url(3100) == "http://localhost:3100"
-
-
-class TestQueryLoki:
-    """Tests for query_loki."""
-
-    @patch("production_test_framework.helper.requests.get")
-    def test_builds_url_and_calls_get(self, mock_get):
-        mock_resp = MagicMock()
-        mock_get.return_value = mock_resp
-
-        params = {"query": '{namespace="xpt"}'}
-        result = query_loki(3100, "/loki/api/v1/query_range", params=params)
-
-        assert result is mock_resp
-        mock_get.assert_called_once()
-        call_args = mock_get.call_args
-        assert call_args[0][0] == "http://localhost:3100/loki/api/v1/query_range"
-        assert call_args[1]["params"] == params

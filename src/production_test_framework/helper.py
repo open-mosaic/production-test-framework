@@ -11,7 +11,7 @@ import socket
 import subprocess
 import threading
 import time
-from typing import Callable, List, Optional
+from collections.abc import Callable
 
 import requests
 
@@ -32,9 +32,9 @@ def is_localhost(host: str) -> bool:
 
 
 def run_command(
-    cmd: List[str],
+    cmd: list[str],
     timeout: int = 60,
-    stdin_data: Optional[str] = None,
+    stdin_data: str | None = None,
 ) -> CommandResult:
     """
     Run a command locally via subprocess.
@@ -77,12 +77,12 @@ def run_command(
 
 
 def run_cancellable_command(
-    cmd: List[str],
+    cmd: list[str],
     *,
     timeout: float,
     cancel_event: threading.Event,
     poll_interval: float = 0.5,
-    stdin_data: Optional[str] = None,
+    stdin_data: str | None = None,
     text: bool = True,
 ) -> CommandResult:
     """
@@ -101,7 +101,7 @@ def run_cancellable_command(
         CommandResult; returncode -1 for timeout, cancel, or internal errors.
     """
     deadline = time.monotonic() + timeout
-    pending_input: Optional[str] = stdin_data
+    pending_input: str | None = stdin_data
 
     def _finish_terminated(proc: subprocess.Popen, message: str) -> CommandResult:
         if proc.poll() is None:
@@ -218,7 +218,7 @@ def check_tcp_connectivity(host: str, port: int, timeout: float = 5.0) -> bool:
         result = sock.connect_ex((host, port))
         sock.close()
         return result == 0
-    except socket.error:
+    except OSError:
         return False
 
 
@@ -234,9 +234,7 @@ def wait_for_tcp_connectivity(host: str, port: int, timeout: float = 30) -> bool
     return False
 
 
-def ping(
-    host: str, count: int = 1, timeout: float = 2.0, interface: Optional[str] = None
-) -> bool:
+def ping(host: str, count: int = 1, timeout: float = 2.0, interface: str | None = None) -> bool:
     """
     Return True if the host answers an ICMP echo request.
 
@@ -265,7 +263,7 @@ def wait_for_ping(
     host: str,
     timeout: float = 60.0,
     interval: float = 5.0,
-    interface: Optional[str] = None,
+    interface: str | None = None,
 ) -> bool:
     """Poll ping(host) until it succeeds or timeout elapses."""
     deadline = time.monotonic() + timeout
@@ -295,28 +293,5 @@ def query_mimir(mimir_port: int, endpoint: str, params: dict = None, timeout: in
         requests.Response object
     """
     base_url = get_mimir_base_url(mimir_port)
-    url = f"{base_url}{endpoint}"
-    return requests.get(url, params=params, timeout=timeout)
-
-
-def get_loki_base_url(loki_port: int) -> str:
-    """Get the base URL for the Loki HTTP API."""
-    return f"http://localhost:{loki_port}"
-
-
-def query_loki(loki_port: int, endpoint: str, params: dict = None, timeout: int = 10) -> requests.Response:
-    """
-    Query the Loki HTTP API.
-
-    Args:
-        loki_port: Local port where Loki is accessible
-        endpoint: API endpoint (e.g., "/loki/api/v1/query_range")
-        params: Optional query parameters
-        timeout: Request timeout in seconds
-
-    Returns:
-        requests.Response object
-    """
-    base_url = get_loki_base_url(loki_port)
     url = f"{base_url}{endpoint}"
     return requests.get(url, params=params, timeout=timeout)
