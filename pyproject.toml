@@ -22,6 +22,9 @@ dependencies = [
     "pyeapi>=1.0.4",
 ]
 
+[project.optional-dependencies]
+ui = ["playwright>=1.48"]
+
 [project.scripts]
 switch-status = "production_test_framework.switch.switch_status:main"
 
