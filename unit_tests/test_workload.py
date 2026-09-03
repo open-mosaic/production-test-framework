@@ -1028,11 +1028,76 @@ class TestPromptWorkload:
         assert wl.get_result().runtime is not None
         wl.shutdown_executor(wait=True)
 
+    def test_defaults_to_a_single_prompt(self, mock_vllm_client_class):
+        _mock_cls, backend = mock_vllm_client_class
+        wl = PromptWorkload("prompt")
+        wl.start()
+        wl._completion_fut.result(timeout=10.0)
+        assert backend.complete.call_count == 1
+        wl.shutdown_executor(wait=True)
+
+    def test_count_sends_the_prompt_that_many_times(self, mock_vllm_client_class):
+        """One completion is not enough traffic for the profiler to export a collective: a new
+        aggregation key is held as a primer for several windows before it reports real values,
+        so the same prompt has to recur to walk it through."""
+        _mock_cls, backend = mock_vllm_client_class
+        wl = PromptWorkload("prompt", count=5)
+        wl.start()
+        wl._completion_fut.result(timeout=10.0)
+
+        assert backend.complete.call_count == 5
+        # Repeated verbatim -- identical requests reproduce the same message sizes, so they land
+        # on the same keys rather than minting new ones.
+        assert {call.args[0] for call in backend.complete.call_args_list} == {"prompt"}
+        assert wl.status == WorkloadStatus.COMPLETED
+        wl.shutdown_executor(wait=True)
+
+    def test_max_tokens_is_passed_through(self, mock_vllm_client_class):
+        _mock_cls, backend = mock_vllm_client_class
+        wl = PromptWorkload("prompt", max_tokens=256)
+        wl.start()
+        wl._completion_fut.result(timeout=10.0)
+        assert backend.complete.call_args.kwargs["max_tokens"] == 256
+        wl.shutdown_executor(wait=True)
+
+    def test_result_is_the_last_completion(self, mock_vllm_client_class):
+        _mock_cls, backend = mock_vllm_client_class
+        backend.complete = MagicMock(side_effect=[InferenceResult(success=True, text=f"answer {i}") for i in range(3)])
+        wl = PromptWorkload("prompt", count=3)
+        wl.start()
+        wl._completion_fut.result(timeout=10.0)
+        assert wl.get_result().result.text == "answer 2"
+        wl.shutdown_executor(wait=True)
+
+    def test_a_failed_prompt_stops_the_run_and_errors(self, mock_vllm_client_class):
+        """A 404 or a dropped connection part-way through must not read as a completed run:
+        later assertions would be measuring a workload that only partly happened."""
+        _mock_cls, backend = mock_vllm_client_class
+        backend.complete = MagicMock(
+            side_effect=[
+                InferenceResult(success=True, text="ok"),
+                InferenceResult(success=False, error="HTTP 404: nope"),
+                InferenceResult(success=True, text="never reached"),
+            ]
+        )
+        wl = PromptWorkload("prompt", count=3)
+        wl.start()
+        with pytest.raises(RuntimeError, match="prompt 2/3 failed"):
+            wl._completion_fut.result(timeout=10.0)
+
+        assert backend.complete.call_count == 2, "the run must stop at the first failure"
+        assert wl.status == WorkloadStatus.ERROR
+        wl.shutdown_executor(wait=True)
+
+    def test_count_below_one_is_rejected(self, mock_vllm_client_class):
+        with pytest.raises(ValueError, match="count must be at least 1"):
+            PromptWorkload("prompt", count=0)
+
     def test_second_start_raises_when_already_running(self, mock_vllm_client_class):
         _mock_cls, backend = mock_vllm_client_class
         block = threading.Event()
 
-        def blocking_complete(_prompt):
+        def blocking_complete(_prompt, **_kwargs):
             block.wait(timeout=60.0)
             return InferenceResult(success=True, text="ok")
 
