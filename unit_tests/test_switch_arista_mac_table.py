@@ -42,3 +42,27 @@ def test_mac_table_calls_show_mac_address_table() -> None:
 
     assert len(entries) == 3
     switch._node.run_commands.assert_called_once_with(["show mac address-table"])
+
+
+_MAC_TABLE_BY_INTERFACE = {
+    "unicastTable": {
+        "tableEntries": [
+            {"macAddress": "02:dd:00:00:29:00", "interface": "Ethernet41", "vlanId": 1, "entryType": "static"},
+            {"macAddress": "02:dd:00:00:2a:00", "interface": "Ethernet41", "vlanId": 100, "entryType": "static"},
+            {"macAddress": "02:dd:00:00:2b:00", "interface": "Ethernet49/1", "vlanId": 1, "entryType": "static"},
+            {"macAddress": "02:dd:00:00:2c:00", "interface": "Ethernet49/2", "vlanId": 1, "entryType": "static"},
+        ]
+    }
+}
+
+
+def test_mac_table_by_interface_keeps_breakout_lanes_distinct() -> None:
+    switch = _switch()
+    switch._node.run_commands.return_value = [_MAC_TABLE_BY_INTERFACE]
+
+    # an interface's MACs collect into one set; breakout lanes 49/1 and 49/2 stay distinct.
+    assert switch.mac_table_by_interface == {
+        "Ethernet41": {"02:dd:00:00:29:00", "02:dd:00:00:2a:00"},
+        "Ethernet49/1": {"02:dd:00:00:2b:00"},
+        "Ethernet49/2": {"02:dd:00:00:2c:00"},
+    }

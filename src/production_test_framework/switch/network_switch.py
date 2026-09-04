@@ -47,6 +47,14 @@ class NetworkSwitch(ABC):
         """Get the switch MAC address-table (FDB) entries."""
         ...
 
+    @property
+    def mac_table_by_interface(self) -> dict[str, set[str]]:
+        """The MAC table indexed by interface: {interface: {mac, ...}}."""
+        table: dict[str, set[str]] = {}
+        for entry in self.mac_table:
+            table.setdefault(entry.port, set()).add(entry.mac)
+        return table
+
     @abstractmethod
     def port(self, port_id: str) -> Port:
         """Get configuration for a port of the switch."""
