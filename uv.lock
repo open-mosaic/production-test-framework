@@ -1005,6 +1005,7 @@ dependencies = [
     { name = "paramiko" },
     { name = "pip" },
     { name = "pyeapi" },
+    { name = "pyyaml" },
     { name = "qase-pytest" },
     { name = "requests" },
 ]
@@ -1034,6 +1035,7 @@ requires-dist = [
     { name = "pip", specifier = ">=26.1.1" },
     { name = "playwright", marker = "extra == 'ui'", specifier = ">=1.48" },
     { name = "pyeapi", specifier = ">=1.0.4" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "qase-pytest", specifier = ">=8.3.0" },
     { name = "requests", specifier = ">=2.28" },
 ]

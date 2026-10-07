@@ -65,6 +65,7 @@ Runtime dependencies (see [`pyproject.toml`](pyproject.toml)):
 | `opentelemetry-api` / `-sdk` / `-exporter-otlp-proto-grpc` | OTLP metrics emission |
 | `qase-pytest` | Qase TestOps test reporting |
 | `docopt` | CLI argument parsing for `switch-status` |
+| `pyyaml` | Environment variable declaration files (`env_vars.load_declarations`) |
 | `pip` | Runtime package management inside the image |
 
 ### Modules the package provides
@@ -73,7 +74,8 @@ Importable API under `production_test_framework`:
 
 | Module | Key public API |
 | --- | --- |
-| `config` | `LGTMConfig` — LGTM/host config dataclass (`from_env()`) |
+| `config` | `LGTMConfig` — LGTM/host config dataclass (`from_env()`, `environment_variables()`) |
+| `env_vars` | `EnvironmentVariable`, `used_by`, `load_declarations`, `is_set`, `missing_required`, `render_report`, `env_tag_variables` — declare the environment variables a component reads, in Python or a YAML file, and report which are set without printing values |
 | `ssh` | `SSHExecutor`, `CommandResult`, `check_ssh_password_login`, `wait_for_ssh_password_login` |
 | `helper` | `run_command`, `run_cancellable_command`, `ping` / `wait_for_ping`, `check_tcp_connectivity`, `query_mimir` |
 | `k8s` | `KubernetesClient`, `KubectlPortForwarder`, `LocalKubectlPortForwarder`, `Node`, `Pod` |
