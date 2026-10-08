@@ -4,13 +4,14 @@
 """Declare the environment variables a component reads, and report which are set.
 
 Declarations are made in Python or loaded from a YAML file keyed by directory (see
-load_declarations). Values are never rendered, so reports are safe to print for
-variables holding secrets.
+load_declarations). EnvironmentCheck selects the declarations that apply to a set of
+targets, such as the tests a run selected, reports them and enforces the required ones.
+Values are never rendered, so reports are safe to print for variables holding secrets.
 """
 
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -141,22 +142,103 @@ def _declaration(source: str, name: str, spec: object) -> EnvironmentVariable | 
     return used_by(names, variable)[0] if names else variable
 
 
-def load_declarations(path: Path) -> dict[Path, list[EnvironmentVariable | Scoped]]:
+def load_declarations(path: Path, *, root: Path | None = None) -> dict[Path, list[EnvironmentVariable | Scoped]]:
     """Read a declarations file into {directory: declarations}; raises ValueError if malformed.
 
-    Top-level keys are directories relative to the file. Each maps variable names to
-    purpose (required), required, fallback, and used_by (a name or list of names).
+    Top-level keys are directories relative to root (default: the file's directory). Each
+    maps variable names to purpose (required), required, fallback, and used_by (a name or
+    list of names).
     """
+    base = path.parent if root is None else root
     try:
         data = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader) or {}
     except yaml.YAMLError as exc:
         raise ValueError(f"{path.name}: {exc}") from exc
     declarations = {}
     for directory, variables in data.items():
-        where = (path.parent / directory).resolve()
+        where = (base / directory).resolve()
         if not where.is_dir():
-            raise ValueError(f"{path.name}: {directory!r} is not a directory under {path.parent}")
+            raise ValueError(f"{path.name}: {directory!r} is not a directory under {base}")
         if not isinstance(variables, dict):
             raise ValueError(f"{path.name}: {directory!r} must map variable names to declarations")
         declarations[where] = [_declaration(path.name, name, spec) for name, spec in variables.items()]
     return declarations
+
+
+class MissingEnvironmentVariables(Exception):
+    """Required environment variables are unset; the message names each one and its purpose."""
+
+    def __init__(self, missing: list[EnvironmentVariable]):
+        self.missing = missing
+        detail = "\n".join(f"  {v.name}: {v.purpose}" for v in missing)
+        super().__init__(f"{len(missing)} required environment variable(s) are unset:\n{detail}")
+
+
+class EnvironmentCheck:
+    """Select the declarations that apply to a set of targets (e.g. tests), report and enforce them.
+
+    A declaration keyed by a directory applies to targets in it or below it. A Scoped one
+    applies only to targets that use one of its names. When a variable is declared both
+    optional and required, required wins.
+    """
+
+    def __init__(self, declarations: Mapping[Path, Iterable[EnvironmentVariable | Scoped]] | None = None):
+        self._from_file = {Path(d).resolve(): list(e) for d, e in (declarations or {}).items()}
+        self._declared: dict[Path, list[EnvironmentVariable | Scoped]] = {}
+        self._scoped: dict[Path, list[Scoped]] = {}
+        self._selected: dict[str, EnvironmentVariable] = {}
+
+    @classmethod
+    def from_file(cls, path: Path, *, root: Path | None = None) -> EnvironmentCheck:
+        """Check against a declarations file; raises ValueError if it is malformed."""
+        return cls(load_declarations(path, root=root))
+
+    def declare(self, directory: Path, entries: Iterable[EnvironmentVariable | Scoped]) -> None:
+        """Add computed declarations for targets in exactly this directory; call before its first use()."""
+        self._declared.setdefault(Path(directory).resolve(), []).extend(entries)
+
+    def use(self, directory: Path, names: str | Collection[str] = ()) -> None:
+        """Record one target in directory that uses names (e.g. a test's fixtures)."""
+        if isinstance(names, str):
+            names = (names,)
+        directory = Path(directory)
+        if directory not in self._scoped:
+            self._scoped[directory] = []
+            for entry in self._entries(directory.resolve()):
+                if isinstance(entry, Scoped):
+                    self._scoped[directory].append(entry)
+                else:
+                    self._select(entry)
+        for entry in self._scoped[directory]:
+            if not entry.used_by.isdisjoint(names):
+                self._select(entry.variable)
+
+    @property
+    def variables(self) -> list[EnvironmentVariable]:
+        """The variables that apply to the targets used so far."""
+        return list(self._selected.values())
+
+    def missing(self) -> list[EnvironmentVariable]:
+        """Required variables that apply and are unset, sorted by name."""
+        return missing_required(self._selected.values())
+
+    def report(self, title: str, *, full: bool) -> str:
+        """The set/UNSET table when full, otherwise a one-line summary."""
+        if full:
+            return render_report(self._selected.values(), title=title)
+        count = sum(is_set(name) for name in self._selected)
+        return f"{title}: {len(self._selected)} environment variable(s), {count} set"
+
+    def enforce(self) -> None:
+        """Raise MissingEnvironmentVariables if any required variable that applies is unset."""
+        if missing := self.missing():
+            raise MissingEnvironmentVariables(missing)
+
+    def _entries(self, directory: Path) -> list[EnvironmentVariable | Scoped]:
+        inherited = [entry for where in (directory, *directory.parents) for entry in self._from_file.get(where, ())]
+        return inherited + self._declared.get(directory, [])
+
+    def _select(self, variable: EnvironmentVariable) -> None:
+        current = self._selected.get(variable.name)
+        if current is None or (variable.required and not current.required):
+            self._selected[variable.name] = variable

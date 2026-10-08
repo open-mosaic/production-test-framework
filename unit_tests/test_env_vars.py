@@ -201,3 +201,93 @@ class TestLoadDeclarations:
     def test_malformed_file_raises(self, tmp_path, text, message):
         with pytest.raises(ValueError, match=message):
             self._load(tmp_path, text)
+
+
+class TestLoadDeclarationsRoot:
+    """Tests for load_declarations' root argument."""
+
+    def test_keys_resolve_against_root(self, tmp_path):
+        (tmp_path / "suite").mkdir()
+        (tmp_path / "configs").mkdir()
+        path = tmp_path / "configs" / "env_vars.yaml"
+        path.write_text("suite:\n  FOO:\n    purpose: p\n")
+        assert set(env_vars.load_declarations(path, root=tmp_path)) == {(tmp_path / "suite").resolve()}
+
+
+def _required(name):
+    return EnvironmentVariable(name=name, purpose=f"{name} purpose", required=True)
+
+
+class TestEnvironmentCheck:
+    """Tests for EnvironmentCheck."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self):
+        with patch.dict(os.environ, {}, clear=True):
+            yield
+
+    @pytest.fixture
+    def tree(self, tmp_path):
+        for name in ("a/inner", "b"):
+            (tmp_path / name).mkdir(parents=True)
+        return tmp_path
+
+    def _names(self, check):
+        return {v.name for v in check.variables}
+
+    def test_ancestors_apply_and_siblings_do_not(self, tree):
+        check = env_vars.EnvironmentCheck(
+            {tree: [_required("ROOT")], tree / "a": [_required("A")], tree / "b": [_required("B")]}
+        )
+        check.use(tree / "a" / "inner")
+        assert self._names(check) == {"ROOT", "A"}
+
+    def test_scoped_applies_when_any_name_is_used(self, tree):
+        check = env_vars.EnvironmentCheck({tree: env_vars.used_by(["x", "y"], _required("SCOPED"))})
+        check.use(tree, ["z"])
+        assert self._names(check) == set()
+        check.use(tree, ["y"])
+        assert self._names(check) == {"SCOPED"}
+
+    def test_use_takes_a_single_name(self, tree):
+        check = env_vars.EnvironmentCheck({tree: env_vars.used_by("switch_credentials", _required("SCOPED"))})
+        check.use(tree, "s")
+        assert self._names(check) == set()
+        check.use(tree, "switch_credentials")
+        assert self._names(check) == {"SCOPED"}
+
+    def test_declare_adds_to_one_directory(self, tree):
+        check = env_vars.EnvironmentCheck()
+        check.declare(tree / "a", [_required("COMPUTED")])
+        check.use(tree / "b")
+        assert self._names(check) == set()
+        check.use(tree / "a")
+        assert self._names(check) == {"COMPUTED"}
+
+    def test_required_beats_optional(self, tree):
+        check = env_vars.EnvironmentCheck({tree: [EnvironmentVariable(name="FOO", purpose="p")]})
+        check.declare(tree / "a", [_required("FOO")])
+        check.use(tree / "b")
+        check.use(tree / "a")
+        assert [v.required for v in check.variables] == [True]
+
+    def test_report_summary_and_table(self, tree):
+        check = env_vars.EnvironmentCheck({tree: [_required("FOO"), EnvironmentVariable(name="BAR", purpose="p")]})
+        check.use(tree)
+        with patch.dict(os.environ, {"BAR": "x"}):
+            assert check.report("run", full=False) == "run: 2 environment variable(s), 1 set"
+            assert "required:" in check.report("run", full=True)
+
+    def test_enforce_names_every_missing_variable(self, tree):
+        check = env_vars.EnvironmentCheck({tree: [_required("FOO"), _required("BAR")]})
+        check.use(tree)
+        with pytest.raises(env_vars.MissingEnvironmentVariables) as raised:
+            check.enforce()
+        assert [v.name for v in raised.value.missing] == ["BAR", "FOO"]
+        assert "BAR: BAR purpose" in str(raised.value)
+        assert "FOO: FOO purpose" in str(raised.value)
+
+    def test_empty_check_passes(self):
+        check = env_vars.EnvironmentCheck()
+        assert check.missing() == []
+        check.enforce()
