@@ -1,0 +1,13 @@
+# Environment variables read by production_test_framework, loaded with
+# env_vars.load_declarations. Format: see load_declarations.
+#
+# ANSIBLE_REMOTE_USER is required only for a remote REMOTE_HOST, which a static
+# file cannot express; LGTMConfig.environment_variables sets that from the host.
+
+".":
+  REMOTE_HOST:
+    purpose: target host for SSH and kubectl
+    fallback: localhost
+  ANSIBLE_REMOTE_USER:
+    purpose: SSH user for REMOTE_HOST
+    fallback: "not needed: the target is this machine"

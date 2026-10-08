@@ -8,7 +8,19 @@ Loads configuration from environment variables with defaults.
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import cache
+from pathlib import Path
+
+from production_test_framework.env_vars import EnvironmentVariable, load_declarations
+
+_ENV_VARS_FILE = Path(__file__).with_name("env_vars.yaml")
+
+
+@cache
+def _declared() -> dict[str, EnvironmentVariable]:
+    """The package's env_vars.yaml declarations, by name."""
+    return {v.name: v for v in load_declarations(_ENV_VARS_FILE)[_ENV_VARS_FILE.parent.resolve()]}
 
 
 @dataclass
@@ -37,6 +49,16 @@ class LGTMConfig:
         return bool(self.ansible_remote_user)
 
     @classmethod
-    def from_env(cls) -> "LGTMConfig":
+    def from_env(cls) -> LGTMConfig:
         """Create configuration from environment variables."""
         return cls()
+
+    @classmethod
+    def environment_variables(cls) -> list[EnvironmentVariable]:
+        """The variables from_env reads; the SSH user is required only for a remote host."""
+        from production_test_framework.helper import is_localhost
+
+        ssh_user = _declared()["ANSIBLE_REMOTE_USER"]
+        if not is_localhost(cls.from_env().host):
+            ssh_user = replace(ssh_user, required=True, fallback=None)
+        return [_declared()["REMOTE_HOST"], ssh_user]
