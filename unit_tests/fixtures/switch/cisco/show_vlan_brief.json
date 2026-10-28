@@ -1,0 +1,29 @@
+{
+  "TABLE_vlanbriefxbrief": {
+    "ROW_vlanbriefxbrief": [
+      {
+        "vlanshowbr-vlanid": "1",
+        "vlanshowbr-vlanid-utf": "1",
+        "vlanshowbr-vlanname": "default",
+        "vlanshowbr-vlanstate": "active",
+        "vlanshowbr-shutstate": "noshutdown"
+      },
+      {
+        "vlanshowbr-vlanid": "3900",
+        "vlanshowbr-vlanid-utf": "3900",
+        "vlanshowbr-vlanname": "VLAN3900",
+        "vlanshowbr-vlanstate": "active",
+        "vlanshowbr-shutstate": "noshutdown",
+        "vlanshowplist-ifidx": "Ethernet1/1"
+      },
+      {
+        "vlanshowbr-vlanid": "3901",
+        "vlanshowbr-vlanid-utf": "3901",
+        "vlanshowbr-vlanname": "VLAN3901",
+        "vlanshowbr-vlanstate": "active",
+        "vlanshowbr-shutstate": "noshutdown",
+        "vlanshowplist-ifidx": "Ethernet1/1,Ethernet1/2"
+      }
+    ]
+  }
+}

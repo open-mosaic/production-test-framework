@@ -28,6 +28,11 @@ def interface_path(interface_id: str) -> str:
     return f"{INTERFACES_PATH}/{interface_id}"
 
 
+def svi_path(vlan_id: str) -> str:
+    """Path to the VLAN's SVI, the interface NVUE names vlan<id>."""
+    return interface_path(f"vlan{vlan_id}")
+
+
 def bridge_domain_vlan_path(vlan_id: str) -> str:
     return f"{BRIDGE_DOMAIN_VLANS_PATH}/{vlan_id}"
 

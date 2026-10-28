@@ -13,6 +13,10 @@ Only the commands backing the ``NetworkSwitch`` interface are wrapped:
     flow_control          -> not supported yet, raises NotImplementedError
     set_port_admin_state  -> interface <id> ; [no] shutdown
     delete_vlan           -> no vlan <id>
+    port_fec              -> show running-config interfaces <id>
+    set_port_fec          -> interface <id> ; [no|default] error-correction encoding ...
+    svi_address           -> show running-config interfaces Vlan<id>
+    set_svi_address       -> interface Vlan<id> ; ip[v6] address ... / no interface Vlan<id>
 
 Requires eAPI enabled on the switch (``management api http-commands``).
 """
@@ -27,7 +31,9 @@ from pyeapi.eapilib import CommandError
 from pyeapi.eapilib import ConnectionError as EapiConnectionError
 
 from production_test_framework.switch.exceptions import SwitchAPIError
+from production_test_framework.switch.mac import normalize_mac
 from production_test_framework.switch.models import (
+    FecEncoding,
     FlowControl,
     LldpNeighbor,
     MacEntry,
@@ -35,9 +41,14 @@ from production_test_framework.switch.models import (
     NetworkSwitchStatus,
     Port,
     PortBridge,
+    SviAddress,
     Vlan,
 )
-from production_test_framework.switch.network_switch import NetworkSwitch
+from production_test_framework.switch.network_switch import (
+    NetworkSwitch,
+    parse_svi_address,
+    svi_address_from_config,
+)
 from production_test_framework.switch.port_sort import port_id_sort_key
 from production_test_framework.switch.portname import PortNameResolver
 
@@ -151,6 +162,55 @@ class AristaEosSwitch(NetworkSwitch):
         """Remove a VLAN from the switch."""
         self._run_config([f"no vlan {vlan_id}"])
 
+    def port_fec(self, port_id: str) -> FecEncoding | None:
+        """The port's FEC from its running config; no error-correction line is the switch's default."""
+        encodings = set()
+        for line in self._run_text(f"show running-config interfaces {port_id}").splitlines():
+            match line.strip():
+                case "no error-correction encoding":
+                    encodings.add(FecEncoding.OFF)
+                case "error-correction encoding fire-code":
+                    encodings.add(FecEncoding.FIRE_CODE)
+                case "error-correction encoding reed-solomon":
+                    encodings.add(FecEncoding.REED_SOLOMON)
+        # Both encodings configured leaves the choice to the switch, as none does.
+        return encodings.pop() if len(encodings) == 1 else None
+
+    def set_port_fec(self, port_id: str, fec: FecEncoding | None) -> None:
+        """Set the port's FEC. EOS adds an encoding to those the port has, so setting one removes the other."""
+        match fec:
+            case None:
+                commands = ["default error-correction encoding"]
+            case FecEncoding.OFF:
+                commands = ["no error-correction encoding"]
+            case FecEncoding.FIRE_CODE:
+                commands = ["error-correction encoding fire-code", "no error-correction encoding reed-solomon"]
+            case FecEncoding.REED_SOLOMON:
+                commands = ["error-correction encoding reed-solomon", "no error-correction encoding fire-code"]
+            case _:
+                raise ValueError(f"unsupported FEC {fec!r}")
+        self._run_config([f"interface {port_id}", *commands])
+
+    def svi_address(self, vlan_id: str) -> SviAddress | None:
+        """The SVI's address from its running config, which is empty when there is no SVI."""
+        return svi_address_from_config(self._run_text(f"show running-config interfaces Vlan{vlan_id}"))
+
+    def set_svi_address(self, vlan_id: str, address: SviAddress | str | None) -> None:
+        """Make address the SVI's only address, or remove the SVI for None."""
+        if address is None:
+            self._run_config([f"no interface Vlan{vlan_id}"])
+            return
+        address = parse_svi_address(address)
+        family = "ip" if address.version == 4 else "ipv6"
+        self._run_config(
+            [
+                f"interface Vlan{vlan_id}",
+                "no ip address",
+                "no ipv6 address",
+                f"{family} address {address.with_prefixlen}",
+            ]
+        )
+
     # --- eAPI plumbing -------------------------------------------------------
 
     def _run_show(self, command: str) -> dict[str, Any]:
@@ -164,6 +224,19 @@ class AristaEosSwitch(NetworkSwitch):
             raise SwitchAPIError(f"unexpected eAPI response for {command!r}: {results!r}")
         self._logger.debug(f"eAPI response: {results[0]}")
         return results[0]
+
+    def _run_text(self, command: str) -> str:
+        """A show command's text output, for what eAPI has no JSON form of (the running config)."""
+        self._logger.debug(f"eAPI show (text): {command}")
+        try:
+            results = self._node.run_commands([command], encoding="text")
+        except (CommandError, EapiConnectionError) as exc:
+            self._logger.error(f"eAPI command failed: {command}: {exc}")
+            raise SwitchAPIError(f"eAPI command failed: {command}: {exc}") from exc
+        output = results[0].get("output") if results and isinstance(results[0], dict) else None
+        if not isinstance(output, str):
+            raise SwitchAPIError(f"unexpected eAPI response for {command!r}: {results!r}")
+        return output
 
     def _run_config(self, commands: list[str]) -> None:
         self._logger.debug(f"eAPI config: {commands}")
@@ -243,7 +316,7 @@ class AristaEosSwitch(NetworkSwitch):
                 port_id = info.get("interfaceId", "")
                 if not isinstance(port_id, str):
                     continue
-                mac = self._normalize_mac(port_id.replace('"', ""))
+                mac = normalize_mac(port_id.replace('"', ""))
                 if not mac:
                     # A non-MAC port id (e.g. an interface name) is expected; skip it.
                     if info.get("interfaceIdType") == "macAddress":
@@ -271,7 +344,7 @@ class AristaEosSwitch(NetworkSwitch):
         table: list[MacEntry] = []
         for entry in entries:
             interface = entry.get("interface", "")
-            mac = self._normalize_mac(entry.get("macAddress", ""))
+            mac = normalize_mac(entry.get("macAddress", ""))
             if not interface or not mac:
                 continue
             table.append(
@@ -292,14 +365,6 @@ class AristaEosSwitch(NetworkSwitch):
         if port_names.has_breakout:
             self._logger.debug(f"port names: breakout shifts port ids from cage numbers: {port_names.mapping()}")
         return port_names
-
-    @staticmethod
-    def _normalize_mac(value: str) -> str:
-        """Normalize a MAC (dotted "001c.7300.abcd" or colon form) to lowercase colon form, or "" if invalid."""
-        compact = value.replace(".", "").replace(":", "").lower()
-        if len(compact) != 12:
-            return ""
-        return ":".join(compact[i : i + 2] for i in range(0, 12, 2))
 
     def _parse_system_status(self, version: dict[str, Any], hostname: dict[str, Any]) -> NetworkSwitchStatus:
         uptime = version.get("uptime")

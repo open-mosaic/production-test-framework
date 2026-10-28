@@ -25,6 +25,7 @@ from typing import IO, TextIO
 from docopt import docopt
 
 from production_test_framework.switch.arista.arista_eos_switch import AristaEosSwitch
+from production_test_framework.switch.cisco.nxos_switch import CiscoNxosSwitch
 from production_test_framework.switch.models import NetworkSwitchConfig, NetworkSwitchStatus, Port, Vlan
 from production_test_framework.switch.network_switch import NetworkSwitch
 from production_test_framework.switch.nvidia.nvidia_cumulus_switch import NvidiaCumulusSwitch
@@ -32,8 +33,9 @@ from production_test_framework.switch.port_sort import sort_ports
 
 NVIDIA_SWITCH_TYPE = "nvidia-cumulus"
 ARISTA_SWITCH_TYPE = "arista-eos"
+CISCO_SWITCH_TYPE = "cisco-nxos"
 
-_SWITCH_TYPES = frozenset({NVIDIA_SWITCH_TYPE, ARISTA_SWITCH_TYPE})
+_SWITCH_TYPES = frozenset({NVIDIA_SWITCH_TYPE, ARISTA_SWITCH_TYPE, CISCO_SWITCH_TYPE})
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +316,16 @@ def create_switch(
             port=80,
         )
         return AristaEosSwitch(config)
+
+    if switch_type == CISCO_SWITCH_TYPE:
+        config = NetworkSwitchConfig(
+            host=hostname,
+            username=username,
+            password=password,
+            verify_tls=False,
+            port=443,
+        )
+        return CiscoNxosSwitch(config)
 
     raise AssertionError(f"unhandled switch-type: {switch_type}")
 

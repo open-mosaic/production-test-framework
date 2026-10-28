@@ -1,0 +1,24 @@
+{
+  "TABLE_mac_address": {
+    "ROW_mac_address": [
+      {
+        "disp_mac_addr": "0200.0000.3900",
+        "disp_type": "static",
+        "disp_vlan": "3900",
+        "disp_age": "-",
+        "disp_is_secure": "F",
+        "disp_is_ntfy": "F",
+        "disp_port": "Eth1/1"
+      },
+      {
+        "disp_mac_addr": "e489.ca84.5183",
+        "disp_type": "static",
+        "disp_vlan": "-",
+        "disp_age": "-",
+        "disp_is_secure": "F",
+        "disp_is_ntfy": "F",
+        "disp_port": "sup-eth1(R)"
+      }
+    ]
+  }
+}

@@ -10,7 +10,7 @@ the IDs they are given, and what does and does not count as a breakout.
 
 import pytest
 
-from production_test_framework.switch.portname import NO_SUBPORT, PortNameResolver, parse
+from production_test_framework.switch.portname import NO_SUBPORT, PortNameResolver, parse, parse_cisco
 
 
 @pytest.mark.parametrize(
@@ -219,3 +219,48 @@ def test_empty_resolver_reports_nothing() -> None:
     assert port_names.mapping() == ""
     assert port_names.port_id("swp1") is None
     assert port_names.name(1) is None
+
+
+@pytest.mark.parametrize(
+    ("interface_name", "expected"),
+    [
+        # Cisco NX-OS: slot/port, plus /subport when broken out; "Eth" in some tables.
+        ("Ethernet1/49", (1, 49, NO_SUBPORT)),
+        ("Ethernet1/49/2", (1, 49, 2)),
+        ("Eth1/1", (1, 1, NO_SUBPORT)),
+        ("Ethernet2/3", (2, 3, NO_SUBPORT)),
+    ],
+)
+def test_parse_cisco(interface_name: str, expected: tuple[int, int, int]) -> None:
+    name = parse_cisco(interface_name)
+    assert name is not None
+    assert name.prefix == "Ethernet"
+    assert (name.slot, name.cage, name.subport) == expected
+    assert name.raw == interface_name
+
+
+@pytest.mark.parametrize("interface_name", ["mgmt0", "Vlan1", "Ethernet49", "port-channel1", "sup-eth1(R)"])
+def test_parse_cisco_rejects(interface_name: str) -> None:
+    assert parse_cisco(interface_name) is None
+
+
+def test_parse_reads_a_cisco_name_differently() -> None:
+    """Why NX-OS needs its own parser: the default one reads "Ethernet1/49" the
+    Arista way, as cage 1, subport 49."""
+    name = parse("Ethernet1/49")
+    assert name is not None
+    assert (name.cage, name.subport) == (1, 49)
+
+
+def test_learn_cisco_orders_by_slot_then_port() -> None:
+    port_names = PortNameResolver(parser=parse_cisco)
+    assert port_names.learn(["Ethernet2/1", "Ethernet1/10", "mgmt0", "Ethernet1/2", "Ethernet1/1"]) == 4
+    assert port_names.mapping() == "1=Ethernet1/1 2=Ethernet1/2 3=Ethernet1/10 4=Ethernet2/1"
+    assert not port_names.has_breakout
+
+
+def test_learn_cisco_breakout_shifts_later_ports() -> None:
+    port_names = PortNameResolver(parser=parse_cisco)
+    port_names.learn(["Ethernet1/1/1", "Ethernet1/1/2", "Ethernet1/2"])
+    assert port_names.mapping() == "1=Ethernet1/1/1 2=Ethernet1/1/2 3=Ethernet1/2"
+    assert port_names.has_breakout

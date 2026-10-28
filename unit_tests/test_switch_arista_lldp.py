@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from production_test_framework.switch.arista.arista_eos_switch import AristaEosSwitch
+from production_test_framework.switch.mac import normalize_mac
 from production_test_framework.switch.models import NetworkSwitchConfig
 from production_test_framework.switch.portname import PortNameResolver
 
@@ -112,9 +113,11 @@ def test_parse_lldp_neighbors_breakout_shifts_port_ids() -> None:
         ("001c.7300.abcd", "00:1c:73:00:ab:cd"),
         ("00:1C:73:00:AB:CD", "00:1c:73:00:ab:cd"),
         ("001c7300abcd", "00:1c:73:00:ab:cd"),
+        ("00-1c-73-00-ab-cd", "00:1c:73:00:ab:cd"),
         ("not-a-mac", ""),
+        ("zz1c7300abcd", ""),
         ("", ""),
     ],
 )
 def test_normalize_mac(raw: str, expected: str) -> None:
-    assert AristaEosSwitch._normalize_mac(raw) == expected
+    assert normalize_mac(raw) == expected

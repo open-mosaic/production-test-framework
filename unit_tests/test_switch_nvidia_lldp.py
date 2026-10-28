@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from production_test_framework.switch.mac import normalize_mac
 from production_test_framework.switch.models import NetworkSwitchConfig
 from production_test_framework.switch.nvidia.nvidia_cumulus_switch import VIEW_LLDP_DETAIL, NvidiaCumulusSwitch
 from production_test_framework.switch.nvidia.nvue_paths import INTERFACES_PATH
@@ -87,7 +88,7 @@ def test_parse_lldp_neighbors_breakout_shifts_port_ids() -> None:
     ],
 )
 def test_normalize_mac(raw: str, expected: str) -> None:
-    assert NvidiaCumulusSwitch._normalize_mac(raw) == expected
+    assert normalize_mac(raw) == expected
 
 
 @patch("production_test_framework.switch.nvidia.nvidia_cumulus_switch.requests.Session.get")

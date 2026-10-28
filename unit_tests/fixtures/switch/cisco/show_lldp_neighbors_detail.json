@@ -1,0 +1,54 @@
+{
+  "neigh_hdr": "neigh_hdr",
+  "neigh_count": 2,
+  "TABLE_nbor_detail": {
+    "ROW_nbor_detail": [
+      {
+        "chassis_type": "Mac Address",
+        "chassis_id": "444c.a896.53eb",
+        "port_type": "Interface Name",
+        "port_id": "Ethernet15",
+        "l_port_id": "mgmt0",
+        "port_desc": "null",
+        "sys_name": "rack1-frontend-sw1",
+        "sys_desc": "Arista Networks EOS version 4.27.1.1F running on an Arista Networks DCS-7050TX-72Q",
+        "ttl": 118,
+        "system_capability": "B, R",
+        "enabled_capability": "B",
+        "mgmt_addr_type": "IPV4",
+        "mgmt_addr": "10.20.0.103",
+        "mgmt_addr_ipv6_type": "Address not advertised",
+        "mgmt_addr_ipv6": "not advertised",
+        "vlan_id": "1",
+        "max_framesize": "9416",
+        "vlan_name": "not advertised",
+        "link_agg_capability": "not advertised",
+        "link_agg_status": "not advertised",
+        "link_agg_id": 0
+      },
+      {
+        "chassis_type": "Mac Address",
+        "chassis_id": "0200.0000.0001",
+        "port_type": "Mac Address",
+        "port_id": "0200.0000.0005",
+        "l_port_id": "Eth1/2",
+        "port_desc": "null",
+        "sys_name": "epi",
+        "sys_desc": "null",
+        "ttl": 118,
+        "system_capability": "B, R",
+        "enabled_capability": "B",
+        "mgmt_addr_type": "IPV4",
+        "mgmt_addr": "not advertised",
+        "mgmt_addr_ipv6_type": "Address not advertised",
+        "mgmt_addr_ipv6": "not advertised",
+        "vlan_id": "1",
+        "max_framesize": "9416",
+        "vlan_name": "not advertised",
+        "link_agg_capability": "not advertised",
+        "link_agg_status": "not advertised",
+        "link_agg_id": 0
+      }
+    ]
+  }
+}

@@ -2,6 +2,11 @@
 # Copyright (c) 2025 Delos Data, Inc.
 
 from dataclasses import dataclass, field
+from enum import StrEnum
+from ipaddress import IPv4Interface, IPv6Interface
+
+# An SVI address: an IP address with its prefix length, e.g. 10.0.0.1/24.
+SviAddress = IPv4Interface | IPv6Interface
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,14 @@ class PortBridge:
     mode: str | None = None  # "trunk" or "access"; Arista may also report e.g. "dot1qTunnel" or "tap"
     native_vlan: int | None = None  # PVID: the VLAN untagged ingress frames are placed in
     learning: bool | None = None  # True = the port learns source MACs into the FDB
+
+
+class FecEncoding(StrEnum):
+    """A port's forward error correction. Both ends of a link must use the same one."""
+
+    OFF = "off"
+    FIRE_CODE = "fire-code"  # BASE-R, IEEE 802.3 Clause 74
+    REED_SOLOMON = "reed-solomon"  # RS(528) or RS(544), as the port speed needs
 
 
 @dataclass(frozen=True)

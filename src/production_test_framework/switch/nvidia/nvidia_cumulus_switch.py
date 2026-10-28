@@ -5,6 +5,7 @@
 
 import logging
 import time
+from ipaddress import ip_interface
 from typing import Any
 
 import requests
@@ -13,7 +14,9 @@ from requests.auth import HTTPBasicAuth
 from urllib3.util.retry import Retry
 
 from production_test_framework.switch.exceptions import SwitchAPIError
+from production_test_framework.switch.mac import normalize_mac
 from production_test_framework.switch.models import (
+    FecEncoding,
     FlowControl,
     LldpNeighbor,
     MacEntry,
@@ -21,9 +24,10 @@ from production_test_framework.switch.models import (
     NetworkSwitchStatus,
     Port,
     PortBridge,
+    SviAddress,
     Vlan,
 )
-from production_test_framework.switch.network_switch import NetworkSwitch
+from production_test_framework.switch.network_switch import NetworkSwitch, parse_svi_address
 from production_test_framework.switch.nvidia.nvue_paths import (
     BRIDGE_DOMAIN,
     BRIDGE_DOMAIN_MAC_TABLE_PATH,
@@ -40,6 +44,7 @@ from production_test_framework.switch.nvidia.nvue_paths import (
     interface_bridge_vlan_path,
     interface_path,
     revision_path,
+    svi_path,
 )
 from production_test_framework.switch.port_sort import port_id_sort_key
 from production_test_framework.switch.portname import PortNameResolver
@@ -51,6 +56,9 @@ VIEW_DESCRIPTION = "description"
 
 # OpenAPI getInterfaces view=lldp-detail: per-interface LLDP neighbor detail.
 VIEW_LLDP_DETAIL = "lldp-detail"
+
+# NVUE's link fec values; "auto" (and none set) is the switch's own choice.
+_FEC_VALUES = {FecEncoding.OFF: "off", FecEncoding.FIRE_CODE: "baser", FecEncoding.REED_SOLOMON: "rs"}
 
 # NVUE names data ports "swp<cage>", plus a subport index when the cage is
 # broken out. Management, loopback, bridge, bond and VLAN interfaces are
@@ -218,6 +226,64 @@ class NvidiaCumulusSwitch(NetworkSwitch):
         self._apply_revision(revision_id)
         self.refresh()
 
+    def port_fec(self, port_id: str) -> FecEncoding | None:
+        """The port's link fec from its applied config (NVUE: interface <id> link fec)."""
+        body = self._run_api_call(interface_path(port_id), params={"rev": "applied"})
+        link = body.get("link")
+        fec = link.get("fec") if isinstance(link, dict) else None
+        return next((encoding for encoding, value in _FEC_VALUES.items() if value == fec), None)
+
+    def set_port_fec(self, port_id: str, fec: FecEncoding | None) -> None:
+        """Set the port's link fec; None sets auto, the switch's default."""
+        value = "auto" if fec is None else _FEC_VALUES.get(fec)
+        if value is None:
+            raise ValueError(f"unsupported FEC {fec!r}")
+        revision_id = self._create_revision()
+        self._run_api_write(
+            "PATCH", interface_path(port_id), params={"rev": revision_id}, json_body={"link": {"fec": value}}
+        )
+        self._apply_revision(revision_id)
+        self.refresh()
+
+    def svi_address(self, vlan_id: str) -> SviAddress | None:
+        """The SVI's address from its applied config (NVUE: interface vlan<id> ip address)."""
+        body = self._applied_config_or_none(svi_path(vlan_id))
+        ip = body.get("ip") if body else None
+        addresses = ip.get("address") if isinstance(ip, dict) else None
+        if not isinstance(addresses, dict):
+            return None
+        # The kernel's link-local address is the switch's own, not one set here.
+        parsed = sorted(
+            (a for a in map(_parse_address, addresses) if a is not None and not a.ip.is_link_local),
+            key=lambda a: (a.version, a),
+        )
+        return parsed[0] if parsed else None
+
+    def set_svi_address(self, vlan_id: str, address: SviAddress | str | None) -> None:
+        """Make address the SVI's only address, or remove the SVI for None, in one changeset."""
+        # Everything that can fail on the arguments fails before the changeset exists.
+        svi = None
+        if address is not None:
+            parsed = parse_svi_address(address)
+            svi = {
+                f"vlan{vlan_id}": {"type": "svi", "vlan": int(vlan_id), "ip": {"address": {parsed.with_prefixlen: {}}}}
+            }
+        revision_id = self._create_revision()
+        if svi is None:
+            self._delete_if_present(svi_path(vlan_id), revision_id)
+        else:
+            self._delete_if_present(f"{svi_path(vlan_id)}/ip/address", revision_id)
+            self._run_api_write("PATCH", INTERFACES_PATH, params={"rev": revision_id}, json_body=svi)
+        self._apply_revision(revision_id)
+        self.refresh()
+
+    def _delete_if_present(self, path: str, revision_id: str) -> None:
+        try:
+            self._run_api_write("DELETE", path, params={"rev": revision_id})
+        except SwitchAPIError as error:
+            if error.status_code != 404:
+                raise
+
     def refresh(self) -> None:
         """Drop cached interface data so the next read re-fetches from the switch."""
         self._interfaces_config_cache = None
@@ -368,7 +434,7 @@ class NvidiaCumulusSwitch(NetworkSwitch):
 
         if response.status_code not in (200, 201, 204):
             self._logger.error(f"API call failed: {response.status_code} {response.text}")
-            raise SwitchAPIError(f"API call failed: {response.status_code} {response.text}")
+            raise SwitchAPIError(f"API call failed: {response.status_code} {response.text}", response.status_code)
 
         result = response.json() if response.content else None
         self._logger.debug(f"NVUE response: {result}")
@@ -475,7 +541,7 @@ class NvidiaCumulusSwitch(NetworkSwitch):
                 port_name = port_obj.get("name")
                 if not isinstance(port_name, str):
                     continue
-                mac = self._normalize_mac(port_name)
+                mac = normalize_mac(port_name)
                 if not mac:
                     self._logger.warning(f"lldp_neighbors: invalid MAC {port_name!r} on {interface_id}")
                     continue
@@ -497,14 +563,6 @@ class NvidiaCumulusSwitch(NetworkSwitch):
             self._logger.debug(f"port names: breakout shifts port ids from cage numbers: {port_names.mapping()}")
         return port_names
 
-    @staticmethod
-    def _normalize_mac(value: str) -> str:
-        """Normalize a MAC (with or without colons) to lowercase colon form, or "" if invalid."""
-        compact = value.replace(":", "").lower()
-        if len(compact) != 12:
-            return ""
-        return ":".join(compact[i : i + 2] for i in range(0, 12, 2))
-
     def _parse_system_status(self, system: dict, platform: dict, firmware: dict) -> NetworkSwitchStatus:
         return NetworkSwitchStatus(
             uptime=system["uptime"],
@@ -515,3 +573,10 @@ class NvidiaCumulusSwitch(NetworkSwitch):
             asic_model=platform["asic-model"],
             software_version=system["version"]["image"],
         )
+
+
+def _parse_address(value: str) -> SviAddress | None:
+    try:
+        return ip_interface(value)
+    except ValueError:
+        return None

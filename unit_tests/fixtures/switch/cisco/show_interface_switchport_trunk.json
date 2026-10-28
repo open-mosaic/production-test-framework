@@ -1,0 +1,31 @@
+{
+  "TABLE_interface": {
+    "ROW_interface": {
+      "interface": "Ethernet1/1",
+      "switchport": "Enabled",
+      "switchport_monitor": "Not enabled",
+      "switchport_isolated": "Not enabled",
+      "switchport_block_multicast": "Not enabled",
+      "switchport_block_unicast": "Not enabled",
+      "mac_address_static_only": "Disabled",
+      "mac_learning": "Disabled",
+      "oper_mode": "trunk",
+      "access_vlan": 1,
+      "access_vlan_name": "default",
+      "native_vlan": 3900,
+      "native_vlan_name": "VLAN3900",
+      "trunk_vlans": "3900-3901",
+      "voice_vlan_name": "none",
+      "extended_trust_name": "not trusted [COS = 0]",
+      "admin_pvlan_pri_assoc": "none",
+      "admin_pvlan_sec_assoc": "none",
+      "admin_pvlan_pri_mapping": "none",
+      "admin_pvlan_sec_mapping": "none",
+      "admin_pvlan_trunk_native": "none",
+      "admin_pvlan_trunk_encap": "dot1q",
+      "admin_pvlan_trunk_normal": "none",
+      "admin_pvlan_trunk_private": "none",
+      "oper_pvlan": "none"
+    }
+  }
+}

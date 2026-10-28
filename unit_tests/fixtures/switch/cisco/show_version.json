@@ -1,0 +1,11 @@
+{
+  "bios_ver_str": "01.08",
+  "nxos_ver_str": "10.5(3)",
+  "chassis_id": "cisco Nexus N9364E-SG2-O Chassis",
+  "proc_board_id": "FLM29353EL9",
+  "host_name": "switch",
+  "kern_uptm_days": 1,
+  "kern_uptm_hrs": 14,
+  "kern_uptm_mins": 30,
+  "kern_uptm_secs": 21
+}

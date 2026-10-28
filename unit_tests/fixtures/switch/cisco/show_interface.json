@@ -1,0 +1,40 @@
+{
+  "TABLE_interface": {
+    "ROW_interface": [
+      {
+        "interface": "mgmt0",
+        "state": "up",
+        "admin_state": "up",
+        "eth_speed": "1000 Mb/s"
+      },
+      {
+        "interface": "Ethernet1/1",
+        "state": "down",
+        "state_rsn_desc": "XCVR not inserted",
+        "admin_state": "up",
+        "eth_mode": "trunk",
+        "eth_speed": "auto-speed"
+      },
+      {
+        "interface": "Ethernet1/2",
+        "state": "down",
+        "state_rsn_desc": "XCVR not inserted",
+        "admin_state": "down",
+        "eth_mode": "access",
+        "eth_speed": "auto-speed"
+      },
+      {
+        "interface": "Ethernet1/10",
+        "state": "down",
+        "state_rsn_desc": "XCVR not inserted",
+        "admin_state": "down",
+        "eth_speed": "auto-speed"
+      },
+      {
+        "interface": "Vlan1",
+        "svi_admin_state": "down",
+        "svi_line_proto": "down"
+      }
+    ]
+  }
+}

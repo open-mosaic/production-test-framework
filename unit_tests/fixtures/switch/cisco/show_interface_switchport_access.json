@@ -1,0 +1,31 @@
+{
+  "TABLE_interface": {
+    "ROW_interface": {
+      "interface": "Ethernet1/2",
+      "switchport": "Enabled",
+      "switchport_monitor": "Not enabled",
+      "switchport_isolated": "Not enabled",
+      "switchport_block_multicast": "Not enabled",
+      "switchport_block_unicast": "Not enabled",
+      "mac_address_static_only": "Disabled",
+      "mac_learning": "Enabled",
+      "oper_mode": "access",
+      "access_vlan": 3901,
+      "access_vlan_name": "VLAN3901",
+      "native_vlan": 1,
+      "native_vlan_name": "default",
+      "trunk_vlans": "1-4094",
+      "voice_vlan_name": "none",
+      "extended_trust_name": "not trusted [COS = 0]",
+      "admin_pvlan_pri_assoc": "none",
+      "admin_pvlan_sec_assoc": "none",
+      "admin_pvlan_pri_mapping": "none",
+      "admin_pvlan_sec_mapping": "none",
+      "admin_pvlan_trunk_native": "none",
+      "admin_pvlan_trunk_encap": "dot1q",
+      "admin_pvlan_trunk_normal": "none",
+      "admin_pvlan_trunk_private": "none",
+      "oper_pvlan": "none"
+    }
+  }
+}
