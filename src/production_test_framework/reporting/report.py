@@ -18,6 +18,7 @@ whatever the suite chooses to record, so a suite that records nothing still gets
 import datetime as dt
 import html
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,6 +84,11 @@ def summary_line(text: str) -> str:
     return lines[-1]
 
 
+def _anchor(section: int, title: str) -> str:
+    """The id of a table's heading: unique per section, so two tests' tables never collide."""
+    return f"s{section}-" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+
+
 @dataclass
 class _Outcome:
     """One row of the summary half: what pytest reported for a test."""
@@ -116,6 +122,7 @@ class _Figure:
 
     markup: str
     title: str = ""
+    data_tables: tuple[str, ...] = ()
 
 
 @dataclass
@@ -177,6 +184,9 @@ pre.failure, pre.output { color:var(--fg); padding:.75rem 1rem; overflow-x:auto;
   font-size:12px; line-height:1.45; margin:.5rem 0 0; }
 pre.failure { background:var(--bad-bg); border-left:3px solid var(--bad); }
 pre.output { background:var(--panel); border-left:3px solid var(--rule); }
+a { color:var(--c3); }
+div.figure { border-top:2px solid var(--rule); margin-top:2.5rem; padding-top:.15rem; }
+div.figure > h4 { margin-top:.9rem; color:var(--fg); font-size:.85rem; }
 a.top { color:var(--muted); font-size:.8rem; text-decoration:none; }
 .charts { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr)); gap:1.1rem 1.5rem;
   margin:.6rem 0 .2rem; }
@@ -184,6 +194,7 @@ a.top { color:var(--muted); font-size:.8rem; text-decoration:none; }
 .chart svg { width:100%; height:auto; overflow:visible; display:block; }
 .chart figcaption { color:var(--muted); font-size:.78rem; margin-top:.3rem; }
 .chart figcaption b { color:var(--fg); font-weight:600; }
+.chart figcaption.above { margin:0 0 .4rem; }
 /* Values and labels wear text tokens; the bar alone carries the encoding. */
 .chart .cl { fill:var(--muted); font-size:10px; text-anchor:end; dominant-baseline:middle; }
 .chart .cv { fill:var(--fg); font-size:10px; dominant-baseline:middle; font-variant-numeric:tabular-nums; }
@@ -299,13 +310,16 @@ class Reporter:
             return
         self._append(_Output(text, title))
 
-    def figure(self, markup: str, *, title: str = "") -> None:
+    def figure(self, markup: str, *, title: str = "", data_tables: tuple[str, ...] = ()) -> None:
         """
         Add an inline SVG figure, built by :mod:`.charts`.
+
+        *data_tables* names the tables in this section holding the figure's numbers; each one
+        present is linked from the figure.
         """
         if not markup or not self.writes_file:
             return
-        self._append(_Figure(markup, title))
+        self._append(_Figure(markup, title, tuple(data_tables)))
 
     def table(
         self,
@@ -444,11 +458,12 @@ class Reporter:
 
     def _render_html(self) -> str:
         detail: list[str] = []
-        for nodeid, items in self._sections:
+        for index, (nodeid, items) in enumerate(self._sections):
             if not items:
                 continue
             if nodeid:
                 detail.append(f"<h3>{html.escape(nodeid)}</h3>")
+            tables = {item.title for item in items if isinstance(item, Table) and item.title}
             for item in items:
                 match item:
                     case _Note(text):
@@ -456,11 +471,21 @@ class Reporter:
                     case _Output(text, title):
                         heading = f"<h4>{html.escape(title)}</h4>" if title else ""
                         detail.append(f"{heading}<pre class='output'>{html.escape(text)}</pre>")
-                    case _Figure(markup, title):
+                    case _Figure(markup, title, data_tables):
                         heading = f"<h4>{html.escape(title)}</h4>" if title else ""
-                        detail.append(f"{heading}{markup}")
+                        links = ", ".join(
+                            f"<a href='#{_anchor(index, name)}'>{html.escape(name)}</a>"
+                            for name in data_tables
+                            if name in tables
+                        )
+                        data = f"<p class='note'>Data: {links}</p>" if links else ""
+                        detail.append(f"<div class='figure'>{heading}{data}{markup}</div>")
                     case Table() as table:
-                        heading = f"<h4>{html.escape(table.title)}</h4>" if table.title else ""
+                        heading = (
+                            f"<h4 id='{_anchor(index, table.title)}'>{html.escape(table.title)}</h4>"
+                            if table.title
+                            else ""
+                        )
                         detail.append(f"{heading}<div class='scroll'>{render_table_html(table)}</div>")
 
         chips = "".join(

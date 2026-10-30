@@ -5,10 +5,11 @@ Inline SVG figures for the report.
 """
 
 import html
+from collections.abc import Callable
 
 from .formatting import format_number
 
-__all__ = ["latency_percentile_figure"]
+__all__ = ["latency_percentile_figure", "scatter_figure"]
 
 LATENCY_FAMILIES = (
     ("ttft", "TTFT", "time to first token"),
@@ -83,11 +84,11 @@ def _panel(name: str, description: str, values: list[tuple[str, float]]) -> str:
 
     return (
         "<figure class='chart'>"
+        f"<figcaption class='above'><b>{html.escape(name)}</b> — {html.escape(description)} (ms)</figcaption>"
         f"<svg viewBox='0 0 {_WIDTH} {height}' role='img' "
         f"aria-label='{html.escape(f'{name} latency percentiles, milliseconds')}'>"
         f"<line class='ca' x1='{_LABEL_GUTTER}' y1='0' x2='{_LABEL_GUTTER}' y2='{height}'/>"
         f"{''.join(marks)}</svg>"
-        f"<figcaption><b>{html.escape(name)}</b> — {html.escape(description)} (ms)</figcaption>"
         "</figure>"
     )
 
@@ -108,3 +109,136 @@ def latency_percentile_figure(latency: dict[str, float]) -> str:
     if not panels:
         return ""
     return f"<div class='charts'>{''.join(panels)}</div>"
+
+
+_SCATTER_W = 360
+_SCATTER_H = 200
+_SCATTER_PAD = (78, 12, 14, 30)  # left, right, top, bottom
+
+
+def _two_places(value: float, unit: str) -> str:
+    return format_number(value, significant=2)
+
+
+#: A y-axis title longer than this puts its "(unit)" on a second line.
+_Y_TITLE_ONE_LINE = 18
+
+
+def _y_axis_title(text: str, middle: float, axis_x: float) -> str:
+    """
+    The rotated y-axis title, centred on the axis and just left of it, its unit on a second line
+    when it is long. The axis's numbers sit only at its ends, so the title never meets them.
+    """
+    name, separator, unit = text.rpartition(" (")
+    lines = [name, f"({unit}"] if separator and len(text) > _Y_TITLE_ONE_LINE else [text]
+    # Rotated -90 degrees, each later line sits to the right of the one before, nearer the plot.
+    spans = "".join(
+        f"<tspan x='0' dy='{'0' if index == 0 else '1.15em'}'>{html.escape(line)}</tspan>"
+        for index, line in enumerate(lines)
+    )
+    # Each line's baseline is its right edge once rotated; the last one sits 6px off the axis.
+    x = axis_x - 6 - 11.5 * (len(lines) - 1)
+    return (
+        f"<text class='cv' x='0' y='0' text-anchor='middle' transform='translate({x} {middle}) rotate(-90)'>"
+        f"{spans}</text>"
+    )
+
+
+def _scatter_panel(
+    title: str,
+    x_label: str,
+    y_label: str,
+    points: list[tuple[float, float, str, bool]],
+    x_title: str = "",
+    y_title: str = "",
+    *,
+    formatter: Callable[[float, str], str] = _two_places,
+) -> str:
+    left, right, top, bottom = _SCATTER_PAD
+    width, height = _SCATTER_W - left - right, _SCATTER_H - top - bottom
+    xs = [x for x, _, _, _ in points]
+    ys = [y for _, y, _, _ in points]
+    x_lo, x_hi = min(xs), max(xs)
+    y_lo, y_hi = min(0.0, min(ys)), max(ys)
+    x_span = (x_hi - x_lo) or abs(x_hi) or 1.0
+    y_span = (y_hi - y_lo) or abs(y_hi) or 1.0
+    x_lo, x_hi = x_lo - x_span * 0.1, x_hi + x_span * 0.1
+    if min(xs) >= 0:
+        x_lo = max(0.0, x_lo)
+    y_hi += y_span * 0.1
+
+    def place(x: float, y: float) -> tuple[float, float]:
+        return left + (x - x_lo) / (x_hi - x_lo) * width, top + height - (y - y_lo) / (y_hi - y_lo) * height
+
+    marks = []
+    for x, y, label, current in sorted(points, key=lambda point: point[3]):
+        px, py = place(x, y)
+        reading = f"{label}: {formatter(x, x_label)} {x_label}, {formatter(y, y_label)} {y_label}"
+        marks.append(
+            f"<g><title>{html.escape(reading)}</title>"
+            f"<circle class='{'cb4' if current else 'cb1'}' cx='{px:.1f}' cy='{py:.1f}' r='{5 if current else 3.5}'/>"
+            "</g>"
+        )
+    tick = {
+        name: html.escape(formatter(value, unit))
+        for name, value, unit in (
+            ("x_lo", x_lo, x_label),
+            ("x_hi", x_hi, x_label),
+            ("y_lo", y_lo, y_label),
+            ("y_hi", y_hi, y_label),
+        )
+    }
+    base, middle = top + height, left + width / 2
+    axes = (
+        f"<line class='ca' x1='{left}' y1='{base}' x2='{left + width}' y2='{base}'/>"
+        f"<line class='ca' x1='{left}' y1='{top}' x2='{left}' y2='{base}'/>"
+        f"<text class='cl' x='{left - 4}' y='{top}'>{tick['y_hi']}</text>"
+        f"<text class='cl' x='{left - 4}' y='{base}'>{tick['y_lo']}</text>"
+        f"<text class='cv' x='{left}' y='{base + 12}'>{tick['x_lo']}</text>"
+        f"<text class='cl' x='{left + width}' y='{base + 12}'>{tick['x_hi']}</text>"
+        f"<text class='cv' x='{middle}' y='{base + 24}' text-anchor='middle'>{html.escape(x_title or x_label)}</text>"
+        f"{_y_axis_title(y_title or y_label, top + height / 2, left)}"
+    )
+    return (
+        "<figure class='chart'>"
+        f"<figcaption class='above'><b>{html.escape(title)}</b> ({html.escape(y_label)})</figcaption>"
+        f"<svg viewBox='0 0 {_SCATTER_W} {_SCATTER_H}' role='img' aria-label='{html.escape(title)}'>"
+        f"{axes}{''.join(marks)}</svg>"
+        "</figure>"
+    )
+
+
+def _scatter_legend(entries: list[tuple[str, bool]]) -> str:
+    """One row naming each kind of point the panels draw."""
+    marks, x = [], 6.0
+    for label, current in entries:
+        marks.append(
+            f"<circle class='{'cb4' if current else 'cb1'}' cx='{x}' cy='9' r='{5 if current else 3.5}'/>"
+            f"<text class='cv' x='{x + 10}' y='9'>{html.escape(label)}</text>"
+        )
+        x += 24 + 6.5 * len(label)
+    # Drawn 1.4x so its text matches the panels' scaled-up labels.
+    size = f"viewBox='0 0 {x:.0f} 18' style='width:{x * 1.4:.0f}px'"
+    return f"<div class='chart'><svg {size} role='img' aria-label='legend'>{''.join(marks)}</svg></div>"
+
+
+def scatter_figure(
+    panels: list[tuple],
+    legend: tuple[str, str] = ("this run", "other runs"),
+    formatter: Callable[[float, str], str] = _two_places,
+) -> str:
+    """
+    Small-multiple scatter plots, one per ``(title, x_unit, y_unit, points[, x_title, y_title])``
+    panel, under a legend. The axis titles default to the units.
+
+    Each point is ``(x, y, label, current)``; current points are drawn larger and darker and named
+    by ``legend[0]``, the rest by ``legend[1]``. Panels with no point are left out, and "" is
+    returned when none remain. *formatter* renders a value given its axis's unit; each point's
+    label shows when it is hovered.
+    """
+    drawn = [_scatter_panel(*panel, formatter=formatter) for panel in panels if panel[3]]
+    if not drawn:
+        return ""
+    kinds = {current for panel in panels for *_, current in panel[3]}
+    entries = [(name, current) for name, current in ((legend[0], True), (legend[1], False)) if current in kinds]
+    return f"{_scatter_legend(entries)}<div class='charts'>{''.join(drawn)}</div>"

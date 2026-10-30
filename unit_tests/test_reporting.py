@@ -12,6 +12,7 @@ from production_test_framework.reporting.charts import MIN_BARS, latency_percent
 from production_test_framework.reporting.environment import (
     benchmark_option_rows,
     command_output,
+    display_path,
     git_rows,
     pool_summary,
     profile_host,
@@ -617,3 +618,52 @@ class TestLatencyFigure:
             reporter.figure(latency_percentile_figure(self.FULL), title="Latency distribution")
             body = rendered(reporter)
             assert ("<figure class='chart'>" in body) is present
+
+
+class TestFigureDataLinks:
+    """A figure links to the tables in its own section that hold its numbers."""
+
+    def test_links_to_a_table_in_the_same_section(self, report):
+        report.start_test("t.py::a")
+        report.table(["m"], [["1"]], title="Raw numbers")
+        report.figure("<svg></svg>", title="Chart", data_tables=("Raw numbers",))
+        html = rendered(report)
+        assert "<h4 id='s0-raw-numbers'>Raw numbers</h4>" in html
+        assert "<a href='#s0-raw-numbers'>Raw numbers</a>" in html
+
+    def test_no_link_when_the_table_is_absent(self, report):
+        report.start_test("t.py::a")
+        report.figure("<svg></svg>", title="Chart", data_tables=("Raw numbers",))
+        assert "Data:" not in rendered(report)
+
+    def test_same_titles_in_two_sections_get_distinct_anchors(self, report):
+        for nodeid in ("t.py::a", "t.py::b"):
+            report.start_test(nodeid)
+            report.table(["m"], [["1"]], title="Raw numbers")
+            report.figure("<svg></svg>", title="Chart", data_tables=("Raw numbers",))
+        html = rendered(report)
+        assert "href='#s0-raw-numbers'" in html
+        assert "href='#s1-raw-numbers'" in html
+
+
+class TestDisplayPath:
+    """Paths in a shared report never carry the private prefix."""
+
+    @pytest.fixture
+    def checkout(self, tmp_path, monkeypatch):
+        repo = tmp_path / "home" / "someone" / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "suite" / "build").mkdir(parents=True)
+        return repo
+
+    def test_relative_to_the_working_directory_inside_the_checkout(self, checkout, monkeypatch):
+        monkeypatch.chdir(checkout / "suite")
+        assert display_path(checkout / "suite" / "build" / "run") == "build/run"
+
+    def test_repo_relative_when_outside_the_working_directory(self, checkout, monkeypatch):
+        monkeypatch.chdir(checkout / "suite" / "build")
+        assert display_path(checkout / "suite" / "x.yaml") == "repo/suite/x.yaml"
+
+    def test_repo_relative_when_run_from_outside_the_checkout(self, checkout, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        assert display_path(checkout / "suite" / "build") == "repo/suite/build"
