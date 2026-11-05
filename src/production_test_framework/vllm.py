@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import requests
 
+from production_test_framework.helper import poll_until
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Qwen/Qwen3-8B"
@@ -101,23 +103,15 @@ class VllmClient:
         Returns:
             True if server becomes ready, False if timeout exceeded.
         """
-        start_time = time.time()
-        attempt = 0
-
-        while time.time() - start_time < timeout:
-            attempt += 1
-            if self.health_check():
-                elapsed = time.time() - start_time
-                logger.info("vLLM server ready after %.1fs", elapsed)
-                return True
-
-            if attempt % 3 == 0:  # Log every ~15 seconds
-                elapsed = time.time() - start_time
-                logger.info("Waiting for vLLM server to be ready... %.0fs elapsed", elapsed)
-
-            time.sleep(poll_interval)
-
-        return False
+        logger.info("Waiting up to %.0fs for vLLM server to be ready", timeout)
+        start_time = time.monotonic()
+        ready = poll_until(self.health_check, timeout=timeout, interval=poll_interval)
+        elapsed = time.monotonic() - start_time
+        if ready:
+            logger.info("vLLM server ready after %.1fs", elapsed)
+        else:
+            logger.warning("vLLM server not ready after %.1fs", elapsed)
+        return ready
 
     def complete(
         self,

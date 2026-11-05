@@ -253,6 +253,38 @@ def wait_for_tcp_connectivity(host: str, port: int, timeout: float = 30) -> bool
     return False
 
 
+def wait_for_http_ok(
+    url: str,
+    *,
+    timeout: float = 30.0,
+    interval: float = 1.0,
+    request_timeout: float = 5.0,
+    auth: tuple[str, str] | None = None,
+    headers: dict | None = None,
+) -> tuple[bool, str]:
+    """
+    Wait for GET url to answer with a 2xx status.
+
+    Returns:
+        (True, "") once it does, else (False, the last status or connection error).
+    """
+    last_error = ""
+
+    def ok() -> bool:
+        nonlocal last_error
+        try:
+            resp = requests.get(url, timeout=request_timeout, auth=auth, headers=headers)
+        except requests.RequestException as e:
+            last_error = str(e)
+            return False
+        last_error = f"HTTP {resp.status_code}"
+        return 200 <= resp.status_code < 300
+
+    if poll_until(ok, timeout=timeout, interval=interval):
+        return True, ""
+    return False, last_error
+
+
 def ping(host: str, count: int = 1, timeout: float = 2.0, interface: str | None = None) -> bool:
     """
     Return True if the host answers an ICMP echo request.
