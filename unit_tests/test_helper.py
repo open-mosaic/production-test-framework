@@ -110,6 +110,17 @@ class TestRunCancellableCommand:
         assert r.returncode == -1
         assert "timed out" in r.stderr.lower()
 
+    def test_timeout_terminates_children_holding_the_pipes(self):
+        start = time.monotonic()
+        r = run_cancellable_command(
+            ["/bin/sh", "-c", "sleep 60 & sleep 60"],
+            timeout=0.4,
+            cancel_event=threading.Event(),
+            poll_interval=0.1,
+        )
+        assert "timed out" in r.stderr.lower()
+        assert time.monotonic() - start < 10
+
 
 class TestIsLocalhost:
     """Tests for is_localhost."""

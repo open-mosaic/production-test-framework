@@ -38,11 +38,15 @@ __all__ = [
 
 def display_path(path: Path) -> str:
     """
-    A path safe to put in a shared report: repo-relative, with the private prefix dropped.
+    A path safe to put in a shared report, with the private prefix dropped: relative to the
+    working directory when both are in the same checkout, else repo-relative.
     """
     resolved = Path(path).resolve()
+    cwd = Path.cwd().resolve()
     for parent in (resolved, *resolved.parents):
         if (parent / ".git").exists():
+            if cwd.is_relative_to(parent) and resolved.is_relative_to(cwd):
+                return str(resolved.relative_to(cwd))
             return str(Path(parent.name) / resolved.relative_to(parent))
     return f".../{resolved.parent.name}/{resolved.name}"
 

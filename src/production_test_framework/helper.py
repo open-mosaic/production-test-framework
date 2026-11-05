@@ -8,12 +8,14 @@ Provides reusable utilities for testing.
 """
 
 import logging
+import os
+import signal
 import socket
 import statistics
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import requests
 
@@ -88,6 +90,7 @@ def run_cancellable_command(
     poll_interval: float = 0.5,
     stdin_data: str | None = None,
     text: bool = True,
+    env: Mapping[str, str] | None = None,
 ) -> CommandResult:
     """
     Run a command via Popen; return when the process exits, *timeout* is reached,
@@ -100,6 +103,7 @@ def run_cancellable_command(
         poll_interval: How often to wait/check between cancel and completion checks.
         stdin_data: Optional string written to stdin.
         text: Decode stdout/stderr as text.
+        env: Environment for the child; the caller's when None.
 
     Returns:
         CommandResult; returncode -1 for timeout, cancel, or internal errors.
@@ -107,14 +111,23 @@ def run_cancellable_command(
     deadline = time.monotonic() + timeout
     pending_input: str | None = stdin_data
 
+    def _signal_group(proc: subprocess.Popen, sig: signal.Signals) -> None:
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError, PermissionError:
+            pass
+
     def _finish_terminated(proc: subprocess.Popen, message: str) -> CommandResult:
-        if proc.poll() is None:
-            proc.terminate()
+        # The command's children inherit its pipes, so the whole group goes, or communicate() never returns.
+        _signal_group(proc, signal.SIGTERM)
         try:
             out, err = proc.communicate(timeout=30)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            out, err = proc.communicate()
+            _signal_group(proc, signal.SIGKILL)
+            try:
+                out, err = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                return CommandResult(returncode=-1, stdout="", stderr=f"{message}; its output pipes never closed")
         except Exception as e:
             return CommandResult(
                 returncode=-1,
@@ -136,6 +149,8 @@ def run_cancellable_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=text,
+            env=env,
+            start_new_session=True,
         )
     except FileNotFoundError:
         return CommandResult(
