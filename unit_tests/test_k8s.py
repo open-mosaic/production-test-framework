@@ -4,6 +4,7 @@
 """Unit tests for k8s module."""
 
 import json
+import shlex
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -359,6 +360,35 @@ class TestKubernetesClient:
         assert result.success
         assert mock_ssh.run_kubectl.call_args[0][0] == "get secret mc-auth -n mc -o json"
 
+    def test_get_secret_empty_on_bad_json(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout="Error: not json", stderr="")
+
+        secret, result = k8s_client.get_secret("auth", "ns")
+
+        assert secret == {}
+        assert result.success is False
+        assert "did not return JSON" in result.stderr
+
+    def test_get_json_parses_output(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout='{"kind": "Service"}', stderr="")
+
+        obj, result = k8s_client._get_json("get service svc -n ns -o json", timeout=20)
+
+        assert obj == {"kind": "Service"}
+        assert result.success is True
+        mock_ssh.run_kubectl.assert_called_once_with("get service svc -n ns -o json", timeout=20, stdin_data=None)
+
+    def test_get_json_passes_kubectl_failure_through(self, k8s_client, mock_ssh):
+        failure = CommandResult(returncode=1, stdout="", stderr="NotFound")
+        mock_ssh.run_kubectl.return_value = failure
+        assert k8s_client._get_json("get service svc -n ns -o json") == (None, failure)
+
+    def test_service_pod_report_bad_json(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout="<html>", stderr="")
+        assert k8s_client.service_pod_report("ns", "svc").startswith(
+            "could not read svc/svc in ns: kubectl get service"
+        )
+
     def test_get_secret_empty_on_failure(self, k8s_client, mock_ssh):
         mock_ssh.run_kubectl.return_value = CommandResult(returncode=1, stdout="", stderr='secrets "x" not found')
         secret, result = k8s_client.get_secret("x", "mc")
@@ -524,6 +554,81 @@ class TestKubernetesClientWorkloadState:
 
         assert counts == (0, 0, 0)
         assert result.stderr == "not found"
+
+    # -------------------------------------------------------------------------
+    # deployment volumes and rollouts
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _deployment_json(*volumes):
+        return json.dumps({"spec": {"template": {"spec": {"volumes": list(volumes)}}}})
+
+    def test_deployment_volume_returns_named_volume(self, k8s_client, mock_ssh):
+        pvc = {"name": "data", "persistentVolumeClaim": {"claimName": "data"}}
+        mock_ssh.run_kubectl.return_value = CommandResult(
+            returncode=0, stdout=self._deployment_json({"name": "config", "emptyDir": {}}, pvc), stderr=""
+        )
+
+        spec, result = k8s_client.deployment_volume("ns", "app", "data")
+
+        assert result.success is True
+        assert spec == pvc
+        mock_ssh.run_kubectl.assert_called_once_with("get deployment app -n ns -o json", timeout=60, stdin_data=None)
+
+    def test_deployment_volume_missing_is_none(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout=self._deployment_json(), stderr="")
+        assert k8s_client.deployment_volume("ns", "app", "data")[0] is None
+
+    def test_deployment_volume_reports_bad_json(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(returncode=0, stdout="not json", stderr="")
+
+        spec, result = k8s_client.deployment_volume("ns", "app", "data")
+
+        assert spec is None
+        assert result.success is False
+
+    def test_replace_deployment_volume_patches_by_index_and_waits(self, k8s_client, mock_ssh):
+        ok = CommandResult(returncode=0, stdout="", stderr="")
+        mock_ssh.run_kubectl.side_effect = [
+            CommandResult(returncode=0, stdout=self._deployment_json({"name": "config"}, {"name": "data"}), stderr=""),
+            ok,
+            ok,
+        ]
+        spec = {"name": "data", "emptyDir": {"medium": "Memory", "sizeLimit": "32Mi"}}
+
+        result = k8s_client.replace_deployment_volume("ns", "app", spec, timeout=90)
+
+        assert result.success is True
+        patch_args = mock_ssh.run_kubectl.call_args_list[1].args[0]
+        assert patch_args.startswith("patch deployment app -n ns --type=json -p ")
+        patch = json.loads(shlex.split(patch_args)[-1])
+        assert patch == [
+            {"op": "test", "path": "/spec/template/spec/volumes/1/name", "value": "data"},
+            {"op": "replace", "path": "/spec/template/spec/volumes/1", "value": spec},
+        ]
+        assert mock_ssh.run_kubectl.call_args_list[2].args[0] == "rollout status deployment/app -n ns --timeout=90s"
+        assert mock_ssh.run_kubectl.call_args_list[2].kwargs["timeout"] == 120
+
+    def test_replace_deployment_volume_unknown_volume_does_not_patch(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.return_value = CommandResult(
+            returncode=0, stdout=self._deployment_json({"name": "config"}), stderr=""
+        )
+
+        result = k8s_client.replace_deployment_volume("ns", "app", {"name": "data", "emptyDir": {}})
+
+        assert result.success is False
+        assert mock_ssh.run_kubectl.call_count == 1
+
+    def test_replace_deployment_volume_stops_when_patch_fails(self, k8s_client, mock_ssh):
+        mock_ssh.run_kubectl.side_effect = [
+            CommandResult(returncode=0, stdout=self._deployment_json({"name": "data"}), stderr=""),
+            CommandResult(returncode=1, stdout="", stderr="the server rejected our request"),
+        ]
+
+        result = k8s_client.replace_deployment_volume("ns", "app", {"name": "data", "emptyDir": {}})
+
+        assert result.stderr == "the server rejected our request"
+        assert mock_ssh.run_kubectl.call_count == 2
 
     # -------------------------------------------------------------------------
     # pvc_phase

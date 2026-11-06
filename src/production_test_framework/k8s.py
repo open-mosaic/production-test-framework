@@ -35,6 +35,7 @@ WORKLOAD_READINESS_JSONPATH = {
 
 POD_RESTART_TIMEOUT_S = 300.0
 POD_RESTART_INTERVAL_S = 5.0
+ROLLOUT_TIMEOUT_S = 300
 
 STARTUP_RESTART_GRACE_S = 5 * 60
 MAX_POD_RESTARTS = 10
@@ -151,6 +152,18 @@ class KubernetesClient:
             return self._run_kubectl_local(args, timeout=timeout, stdin_data=stdin_data)
         return self.ssh.run_kubectl(args, timeout=timeout, stdin_data=stdin_data)
 
+    def _get_json(self, args: str, timeout: int = 60) -> tuple[dict | None, CommandResult]:
+        """Run kubectl and parse its JSON output; None when kubectl fails or prints something else."""
+        result = self._run_kubectl(args, timeout=timeout)
+        if not result.success:
+            return None, result
+        try:
+            return json.loads(result.stdout), result
+        except json.JSONDecodeError as e:
+            return None, CommandResult(
+                returncode=-1, stdout=result.stdout, stderr=f"kubectl {args} did not return JSON: {e}"
+            )
+
     # -------------------------------------------------------------------------
     # Node Operations
     # -------------------------------------------------------------------------
@@ -200,12 +213,12 @@ class KubernetesClient:
         A pressure condition is what keeps a pod Pending or gets it evicted, so this
         explains a pod that will not come up without having to describe the node.
         """
-        result = self._run_kubectl("get nodes -o json")
-        if not result.success:
+        nodes, result = self._get_json("get nodes -o json")
+        if nodes is None:
             return [], result
 
         lines = []
-        for node in json.loads(result.stdout).get("items", []):
+        for node in nodes.get("items", []):
             conditions = {c["type"]: c for c in node.get("status", {}).get("conditions", [])}
             ready = conditions.get("Ready", {})
             pressure = [
@@ -365,14 +378,14 @@ class KubernetesClient:
         * More than max_restarts restarts over the container's lifetime, whenever they
           happened -- a crash loop slow enough that no single window catches it.
         """
-        result = self._run_kubectl(f"get pods -n {namespace} -o json")
-        if not result.success:
+        pods, result = self._get_json(f"get pods -n {namespace} -o json")
+        if pods is None:
             return [], result
 
         unstable: list[str] = []
         now = datetime.now(UTC)
 
-        for pod in json.loads(result.stdout).get("items", []):
+        for pod in pods.get("items", []):
             name = pod["metadata"]["name"]
             if not name.startswith(name_prefix):
                 continue
@@ -477,8 +490,8 @@ class KubernetesClient:
         rows = listed.stdout.strip().splitlines()
         lines = [f"--- pods matching {selector} in {namespace}"] + [f"  {row}" for row in rows or ["none"]]
 
-        pods = self._run_kubectl(f"get pods -n {namespace} -l {selector} -o json")
-        for pod in json.loads(pods.stdout).get("items", []) if pods.success else []:
+        pods, _ = self._get_json(f"get pods -n {namespace} -l {selector} -o json")
+        for pod in (pods or {}).get("items", []):
             name = pod["metadata"]["name"]
             recent = self._run_kubectl(
                 f"get events -n {namespace} --field-selector involvedObject.name={name} --sort-by=.lastTimestamp"
@@ -540,6 +553,63 @@ class KubernetesClient:
 
         desired, ready, available = (int(field) if field else 0 for field in fields)
         return (desired, ready, available), result
+
+    def wait_for_rollout(
+        self, namespace: str, kind: str, name: str, *, timeout: int = ROLLOUT_TIMEOUT_S
+    ) -> CommandResult:
+        """Wait for the rollout of a deployment, statefulset or daemonset to finish."""
+        return self._run_kubectl(
+            f"rollout status {kind}/{name} -n {namespace} --timeout={timeout}s",
+            timeout=timeout + 30,
+        )
+
+    def _deployment_volumes(self, namespace: str, deployment: str) -> tuple[list[dict], CommandResult]:
+        obj, result = self._get_json(f"get deployment {deployment} -n {namespace} -o json")
+        if obj is None:
+            return [], result
+        try:
+            volumes = obj["spec"]["template"]["spec"].get("volumes", [])
+        except (KeyError, TypeError, AttributeError) as e:
+            return [], CommandResult(
+                returncode=-1,
+                stdout=result.stdout,
+                stderr=f"Unexpected JSON for deployment {deployment}: {e}",
+            )
+        return volumes, result
+
+    def deployment_volume(self, namespace: str, deployment: str, volume: str) -> tuple[dict | None, CommandResult]:
+        """Get the spec of a named volume in a Deployment's pod template; None when there is no such volume."""
+        volumes, result = self._deployment_volumes(namespace, deployment)
+        return next((v for v in volumes if v.get("name") == volume), None), result
+
+    def replace_deployment_volume(
+        self, namespace: str, deployment: str, spec: dict, *, timeout: int = ROLLOUT_TIMEOUT_S
+    ) -> CommandResult:
+        """
+        Replace the pod-template volume named spec["name"] and wait for the rollout to finish.
+
+        The patch checks the volume's name at its index, so a concurrent change to
+        the volume list fails the patch instead of replacing the wrong volume.
+        """
+        volumes, result = self._deployment_volumes(namespace, deployment)
+        if not result.success:
+            return result
+        name = spec.get("name")
+        index = next((i for i, v in enumerate(volumes) if v.get("name") == name), None)
+        if index is None:
+            return CommandResult(returncode=-1, stdout="", stderr=f"Deployment {deployment} has no volume {name!r}")
+
+        path = f"/spec/template/spec/volumes/{index}"
+        patch = [
+            {"op": "test", "path": f"{path}/name", "value": name},
+            {"op": "replace", "path": path, "value": spec},
+        ]
+        result = self._run_kubectl(
+            f"patch deployment {deployment} -n {namespace} --type=json -p {shlex.quote(json.dumps(patch))}"
+        )
+        if not result.success:
+            return result
+        return self.wait_for_rollout(namespace, "deployment", deployment, timeout=timeout)
 
     # -------------------------------------------------------------------------
     # Namespace Operations
@@ -635,10 +705,10 @@ class KubernetesClient:
         """
         pod_report() for the pods a service selects.
         """
-        result = self._run_kubectl(f"get service {service} -n {namespace} -o json")
-        if not result.success:
+        svc, result = self._get_json(f"get service {service} -n {namespace} -o json")
+        if svc is None:
             return f"could not read svc/{service} in {namespace}: {result.stderr.strip()}"
-        selector = json.loads(result.stdout).get("spec", {}).get("selector") or {}
+        selector = svc.get("spec", {}).get("selector") or {}
         if not selector:
             return f"svc/{service} in {namespace} has no selector, so there are no pods to report on"
         return self.pod_report(namespace, ",".join(f"{key}={value}" for key, value in selector.items()))
@@ -658,9 +728,8 @@ class KubernetesClient:
 
         The values under "data" are still base64-encoded, as the API returns them.
         """
-        result = self._run_kubectl(f"get secret {name} -n {namespace} -o json", timeout=30)
-        secret = json.loads(result.stdout) if result.success else {}
-        return secret, result
+        secret, result = self._get_json(f"get secret {name} -n {namespace} -o json", timeout=30)
+        return secret or {}, result
 
     # -------------------------------------------------------------------------
     # Cluster Operations

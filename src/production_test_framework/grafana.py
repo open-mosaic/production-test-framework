@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 import requests
 
-from production_test_framework.helper import poll_until
+from production_test_framework.helper import poll_until, wait_for_http_ok
 
 if TYPE_CHECKING:  # pragma: no cover - import only for annotations
     from playwright.sync_api import Page
@@ -172,14 +172,14 @@ def wait_for_grafana_ready(
     Poll until Grafana serves an authenticated API call.
     """
     path = "/api/org" if auth else "/api/health"
-
-    def answered() -> bool:
-        try:
-            return grafana_request(port, path, auth=auth).status_code == 200
-        except requests.exceptions.RequestException:
-            return False
-
-    return poll_until(answered, timeout=timeout, interval=interval)
+    ok, _ = wait_for_http_ok(
+        f"{grafana_base_url(port)}{path}",
+        auth=auth,
+        timeout=timeout,
+        interval=interval,
+        request_timeout=DEFAULT_TIMEOUT_S,
+    )
+    return ok
 
 
 # =============================================================================

@@ -8,6 +8,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from production_test_framework.helper import (
     check_tcp_connectivity,
@@ -19,6 +20,7 @@ from production_test_framework.helper import (
     query_mimir,
     run_cancellable_command,
     run_command,
+    wait_for_http_ok,
     wait_for_ping,
     wait_for_tcp_connectivity,
 )
@@ -279,6 +281,35 @@ class TestWaitForTcpConnectivity:
         result = wait_for_tcp_connectivity("localhost", 8080, timeout=1)
 
         assert result is False
+
+
+class TestWaitForHttpOk:
+    """Tests for wait_for_http_ok."""
+
+    @patch("production_test_framework.helper.requests.get")
+    def test_returns_once_ok(self, mock_get):
+        mock_get.side_effect = [MagicMock(status_code=503), MagicMock(status_code=200)]
+        assert wait_for_http_ok("http://svc/health", timeout=5, interval=0) == (True, "")
+        assert mock_get.call_count == 2
+
+    @patch("production_test_framework.helper.requests.get")
+    def test_passes_auth_and_headers(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=204)
+
+        assert wait_for_http_ok(
+            "http://svc/health", timeout=0, interval=0, request_timeout=3, auth=("u", "p"), headers={"X-A": "1"}
+        ) == (True, "")
+        mock_get.assert_called_once_with("http://svc/health", timeout=3, auth=("u", "p"), headers={"X-A": "1"})
+
+    @patch("production_test_framework.helper.requests.get")
+    def test_reports_last_status(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=502)
+        assert wait_for_http_ok("http://svc/health", timeout=0, interval=0) == (False, "HTTP 502")
+
+    @patch("production_test_framework.helper.requests.get")
+    def test_reports_connection_error(self, mock_get):
+        mock_get.side_effect = requests.ConnectionError("refused")
+        assert wait_for_http_ok("http://svc/health", timeout=0, interval=0) == (False, "refused")
 
 
 class TestPing:
