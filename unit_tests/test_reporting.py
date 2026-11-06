@@ -12,6 +12,7 @@ from production_test_framework.reporting.charts import MIN_BARS, latency_percent
 from production_test_framework.reporting.environment import (
     benchmark_option_rows,
     command_output,
+    display_path,
     git_rows,
     pool_summary,
     profile_host,
@@ -131,7 +132,6 @@ class TestFailures:
 
         html = rendered(reporter)
         assert "Failures (5)" in html
-        # Each failure contributes one table row; only two get a <pre> traceback.
         for index in range(5):
             assert f"test_{index}" in html
         assert html.count("pre class='failure'") == 2
@@ -169,11 +169,14 @@ class TestHeader:
         path = tmp_path / "logo.svg"
         path.write_text('<svg viewBox="0 0 10 10"><rect fill="currentColor"/></svg>')
         html = rendered(Reporter(tmp_path / "r.html", logo=load_logo(path)))
-        # Inlined rather than linked, so the report survives being copied anywhere, and on
-        # currentColor so the mark follows the theme.
         assert "<svg" in html
         assert "currentColor" in html
         assert "src=" not in html.split("</header>")[0]
+
+    def test_the_stylesheet_is_inlined(self, tmp_path):
+        html = rendered(Reporter(tmp_path / "r.html"))
+        assert "<style>" in html and "header.masthead" in html
+        assert "<link" not in html
 
     def test_an_empty_logo_renders_no_image(self, tmp_path):
         html = rendered(Reporter(tmp_path / "r.html", logo=Logo("")))
@@ -482,7 +485,6 @@ class TestStatusClasses:
         assert "bad" in self.cell_class(report, "failed")
 
     def test_an_unknown_status_is_left_plain(self, report):
-        # Only the numeric alignment every right-aligned cell carries.
         assert self.cell_class(report, "wobbly") == " class='num'"
 
     def test_a_table_names_its_own_statuses(self, report):
@@ -593,9 +595,7 @@ class TestLatencyFigure:
         import re
 
         svg = latency_percentile_figure(self.FULL)
-        # Each panel divides by its own maximum, so the longest bar of every panel reaches the
-        # same x -- whatever that family's numbers are. (H stops a corner radius short of the
-        # bar's end, which is why this is not the full span.)
+
         per_panel = [
             max(float(m) for m in re.findall(r"M46,[\d.]+ H([\d.]+)", panel))
             for panel in svg.split("<figure class='chart'>")[1:]
@@ -609,7 +609,6 @@ class TestLatencyFigure:
         assert "<title>TTFT mean: 10 ms</title>" in svg
 
     def test_the_figure_reaches_the_report_only_in_html(self, tmp_path):
-        from production_test_framework.reporting.formatting import ReportFormat
 
         for fmt, ext, present in ((ReportFormat.HTML, "html", True), (ReportFormat.MD, "md", False)):
             reporter = Reporter(tmp_path / f"r.{ext}", fmt=fmt)
@@ -617,3 +616,52 @@ class TestLatencyFigure:
             reporter.figure(latency_percentile_figure(self.FULL), title="Latency distribution")
             body = rendered(reporter)
             assert ("<figure class='chart'>" in body) is present
+
+
+class TestFigureDataLinks:
+    """A figure links to the tables in its own section that hold its numbers."""
+
+    def test_links_to_a_table_in_the_same_section(self, report):
+        report.start_test("t.py::a")
+        report.table(["m"], [["1"]], title="Raw numbers")
+        report.figure("<svg></svg>", title="Chart", data_tables=("Raw numbers",))
+        html = rendered(report)
+        assert "<h4 id='s0-raw-numbers'>Raw numbers</h4>" in html
+        assert "<a href='#s0-raw-numbers'>Raw numbers</a>" in html
+
+    def test_no_link_when_the_table_is_absent(self, report):
+        report.start_test("t.py::a")
+        report.figure("<svg></svg>", title="Chart", data_tables=("Raw numbers",))
+        assert "Data:" not in rendered(report)
+
+    def test_same_titles_in_two_sections_get_distinct_anchors(self, report):
+        for nodeid in ("t.py::a", "t.py::b"):
+            report.start_test(nodeid)
+            report.table(["m"], [["1"]], title="Raw numbers")
+            report.figure("<svg></svg>", title="Chart", data_tables=("Raw numbers",))
+        html = rendered(report)
+        assert "href='#s0-raw-numbers'" in html
+        assert "href='#s1-raw-numbers'" in html
+
+
+class TestDisplayPath:
+    """Paths in a shared report never carry the private prefix."""
+
+    @pytest.fixture
+    def checkout(self, tmp_path, monkeypatch):
+        repo = tmp_path / "home" / "someone" / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "suite" / "build").mkdir(parents=True)
+        return repo
+
+    def test_relative_to_the_working_directory_inside_the_checkout(self, checkout, monkeypatch):
+        monkeypatch.chdir(checkout / "suite")
+        assert display_path(checkout / "suite" / "build" / "run") == "build/run"
+
+    def test_repo_relative_when_outside_the_working_directory(self, checkout, monkeypatch):
+        monkeypatch.chdir(checkout / "suite" / "build")
+        assert display_path(checkout / "suite" / "x.yaml") == "repo/suite/x.yaml"
+
+    def test_repo_relative_when_run_from_outside_the_checkout(self, checkout, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        assert display_path(checkout / "suite" / "build") == "repo/suite/build"

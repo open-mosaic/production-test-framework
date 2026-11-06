@@ -19,9 +19,11 @@ The submodules are layered so a caller only imports what it needs:
   fixture, and the hooks that feed pytest's results into the :class:`Reporter`.
 * :mod:`~.environment` -- rows describing the runner, the checkout, the GPUs and the profile.
 * :mod:`~.workload` -- the configuration and result tables for a finished workload.
+* :mod:`~.agentx` -- the configuration, result tables and plots of an AgentX run.
 * :mod:`~.assets` -- the header logo, embedded into the report file itself.
 """
 
+from .agentx import report_agentx_configuration, report_agentx_result
 from .assets import Logo, load_logo
 from .environment import (
     benchmark_option_rows,
@@ -78,6 +80,8 @@ __all__ = [
     "render_table",
     "render_table_html",
     "render_table_markdown",
+    "report_agentx_configuration",
+    "report_agentx_result",
     "report_workload_result",
     "run_rows",
     "runner_rows",

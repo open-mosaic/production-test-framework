@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright (c) 2025 Delos Data, Inc.
 
-"""Unit tests for vllm module."""
+"""Unit tests for the vLLM inference client."""
 
 from unittest.mock import MagicMock, patch
 
 import requests
 
-from production_test_framework.vllm import (
+from production_test_framework.vllm.client import (
     DEFAULT_MODEL,
     InferenceResult,
     VllmClient,
@@ -69,7 +69,7 @@ class TestVllmClient:
         client = VllmClient(config=config)
         assert client.base_url == "http://vllm:9090"
 
-    @patch("production_test_framework.vllm.requests.get")
+    @patch("production_test_framework.vllm.client.requests.get")
     def test_health_check_ok(self, mock_get):
         mock_get.return_value = MagicMock(status_code=200)
         client = VllmClient()
@@ -79,19 +79,19 @@ class TestVllmClient:
             timeout=client.config.health_timeout,
         )
 
-    @patch("production_test_framework.vllm.requests.get")
+    @patch("production_test_framework.vllm.client.requests.get")
     def test_health_check_fail_status(self, mock_get):
         mock_get.return_value = MagicMock(status_code=503)
         client = VllmClient()
         assert client.health_check() is False
 
-    @patch("production_test_framework.vllm.requests.get")
+    @patch("production_test_framework.vllm.client.requests.get")
     def test_health_check_request_exception(self, mock_get):
         mock_get.side_effect = requests.exceptions.ConnectionError()
         client = VllmClient()
         assert client.health_check() is False
 
-    @patch("production_test_framework.vllm.requests.post")
+    @patch("production_test_framework.vllm.client.requests.post")
     def test_complete_success(self, mock_post):
         mock_post.return_value = MagicMock(
             status_code=200,
@@ -115,7 +115,7 @@ class TestVllmClient:
         assert call_payload["model"] == DEFAULT_MODEL
         assert result.model == DEFAULT_MODEL
 
-    @patch("production_test_framework.vllm.requests.post")
+    @patch("production_test_framework.vllm.client.requests.post")
     def test_complete_uses_configured_model(self, mock_post):
         """A server serving something other than DEFAULT_MODEL 404s unless the config reaches
         the request. This is the case that pinned every caller to Qwen3-8B."""
@@ -129,7 +129,7 @@ class TestVllmClient:
         assert mock_post.call_args[1]["json"]["model"] == "Qwen/Qwen3-32B"
         assert result.model == "Qwen/Qwen3-32B"
 
-    @patch("production_test_framework.vllm.requests.post")
+    @patch("production_test_framework.vllm.client.requests.post")
     def test_complete_argument_overrides_configured_model(self, mock_post):
         mock_post.return_value = MagicMock(
             status_code=200,
@@ -141,7 +141,7 @@ class TestVllmClient:
         assert mock_post.call_args[1]["json"]["model"] == "Qwen/Qwen3-8B"
         assert result.model == "Qwen/Qwen3-8B"
 
-    @patch("production_test_framework.vllm.requests.post")
+    @patch("production_test_framework.vllm.client.requests.post")
     def test_complete_http_error(self, mock_post):
         mock_post.return_value = MagicMock(status_code=500, text="Internal Server Error")
         client = VllmClient()
@@ -151,7 +151,7 @@ class TestVllmClient:
         assert "500" in result.error
         assert result.response_time >= 0
 
-    @patch("production_test_framework.vllm.requests.post")
+    @patch("production_test_framework.vllm.client.requests.post")
     def test_complete_timeout(self, mock_post):
         mock_post.side_effect = requests.exceptions.Timeout()
         client = VllmClient()
@@ -160,7 +160,7 @@ class TestVllmClient:
         assert result.success is False
         assert result.error == "Request timeout"
 
-    @patch("production_test_framework.vllm.requests.post")
+    @patch("production_test_framework.vllm.client.requests.post")
     def test_complete_request_exception(self, mock_post):
         mock_post.side_effect = requests.exceptions.RequestException("network error")
         client = VllmClient()
