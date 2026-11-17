@@ -378,6 +378,15 @@ wheels = [
 ]
 
 [[package]]
+name = "dictdiffer"
+version = "0.10.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0c/31/84b2b2113c2c972431582bffd74f0d04b5efd9126538127b766275580950/dictdiffer-0.10.0.tar.gz", hash = "sha256:0b912acf663949d73b820d3ed59362140a188ab742c94efe13c762dbd24cbbd3", size = 12451, upload-time = "2026-07-16T12:39:07.886Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9c/2f/7ff60ad2cafd7c970bea75da5f4a9b84b784f7340abcb5fc634d4cf5cd37/dictdiffer-0.10.0-py3-none-any.whl", hash = "sha256:6ca50f38f7c5ee27d52789eee095ae473d9e02e1aa7612cb3aaf25fcf081dbf6", size = 16060, upload-time = "2026-07-16T12:39:06.842Z" },
+]
+
+[[package]]
 name = "distlib"
 version = "0.4.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1005,6 +1014,7 @@ dependencies = [
     { name = "paramiko" },
     { name = "pip" },
     { name = "pyeapi" },
+    { name = "pygnmi" },
     { name = "pyyaml" },
     { name = "qase-pytest" },
     { name = "requests" },
@@ -1035,6 +1045,7 @@ requires-dist = [
     { name = "pip", specifier = ">=26.1.1" },
     { name = "playwright", marker = "extra == 'ui'", specifier = ">=1.48" },
     { name = "pyeapi", specifier = ">=1.0.4" },
+    { name = "pygnmi", specifier = ">=0.8.15" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qase-pytest", specifier = ">=8.3.0" },
     { name = "requests", specifier = ">=2.28" },
@@ -1179,6 +1190,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/49/2e/ced460408999b33da6b31b0021b0f37d329e202d4169aeb164493778f25b/pygments-2.21.0.tar.gz", hash = "sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c", size = 5005329, upload-time = "2026-08-17T08:02:48.824Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl", hash = "sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9", size = 1250147, upload-time = "2026-08-17T08:02:44.912Z" },
+]
+
+[[package]]
+name = "pygnmi"
+version = "0.8.15"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "dictdiffer" },
+    { name = "grpcio" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/49/e8/aae8362da667452e5352875a7df700cc182740d14a01a88b22004bc318db/pygnmi-0.8.15.tar.gz", hash = "sha256:9b43d6334ac7ea73c0b8da395306b7618f4630adab96aaa2f28a79b3b52fdf58", size = 42938, upload-time = "2025-03-10T22:15:34.606Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/d8/1958e627d66f5f0c8dbdb1962850bc9e256fc65129ceb0212c0cb3e0d121/pygnmi-0.8.15-py3-none-any.whl", hash = "sha256:e72859070c7dc3618b578e48c76521db6d627b64a92b496ab886f3ff93a1a396", size = 35561, upload-time = "2025-03-10T22:15:32.981Z" },
 ]
 
 [[package]]

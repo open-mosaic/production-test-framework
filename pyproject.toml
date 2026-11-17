@@ -21,6 +21,7 @@ dependencies = [
     "pip>=26.1.1",
     "pyeapi>=1.0.4",
     "pyyaml>=6.0",
+    "pygnmi>=0.8.15",
 ]
 
 [project.optional-dependencies]

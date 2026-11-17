@@ -9,7 +9,7 @@ Usage:
 
 Options:
     -h --help                   Show this help message and exit
-    --hostname=HOSTNAME         Switch management hostname or IP address
+    --hostname=HOSTNAME         Switch management hostname or IP address (host:port for openconfig)
     --username=USERNAME         Management API username
     --password=PASSWORD         Management API password (prompted securely if omitted)
     --switch-type=TYPE          Switch driver to use [default: nvidia-cumulus]
@@ -29,13 +29,18 @@ from production_test_framework.switch.cisco.nxos_switch import CiscoNxosSwitch
 from production_test_framework.switch.models import NetworkSwitchConfig, NetworkSwitchStatus, Port, Vlan
 from production_test_framework.switch.network_switch import NetworkSwitch
 from production_test_framework.switch.nvidia.nvidia_cumulus_switch import NvidiaCumulusSwitch
+from production_test_framework.switch.openconfig.openconfig_switch import OpenConfigSwitch
 from production_test_framework.switch.port_sort import sort_ports
 
 NVIDIA_SWITCH_TYPE = "nvidia-cumulus"
 ARISTA_SWITCH_TYPE = "arista-eos"
 CISCO_SWITCH_TYPE = "cisco-nxos"
+OPENCONFIG_SWITCH_TYPE = "openconfig"
 
-_SWITCH_TYPES = frozenset({NVIDIA_SWITCH_TYPE, ARISTA_SWITCH_TYPE, CISCO_SWITCH_TYPE})
+# The IANA port for gNMI; a hostname of the form host:port overrides it.
+_GNMI_PORT = 9339
+
+_SWITCH_TYPES = frozenset({NVIDIA_SWITCH_TYPE, ARISTA_SWITCH_TYPE, CISCO_SWITCH_TYPE, OPENCONFIG_SWITCH_TYPE})
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +331,20 @@ def create_switch(
             port=443,
         )
         return CiscoNxosSwitch(config)
+
+    if switch_type == OPENCONFIG_SWITCH_TYPE:
+        host, _, port = hostname.rpartition(":")
+        if not port.isdigit() or not host or (":" in host and not host.startswith("[")):
+            host, port = hostname, str(_GNMI_PORT)
+        host = host.removeprefix("[").removesuffix("]")
+        config = NetworkSwitchConfig(
+            host=host,
+            username=username,
+            password=password,
+            verify_tls=False,
+            port=int(port),
+        )
+        return OpenConfigSwitch(config)
 
     raise AssertionError(f"unhandled switch-type: {switch_type}")
 
