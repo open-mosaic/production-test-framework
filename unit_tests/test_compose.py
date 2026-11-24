@@ -142,3 +142,83 @@ def test_services() -> None:
 
     with patch("production_test_framework.compose._run", run):
         assert _stack().services() == ["db", "api", "worker"]
+
+
+class _FailingUpDocker:
+    """`up` fails; `ps` and `logs` answer as given."""
+
+    def __init__(self, ps_records: list[dict], *, logs_rc: int = 0, up_timeout: bool = False) -> None:
+        self.ps_records = ps_records
+        self.logs_rc = logs_rc
+        self.up_timeout = up_timeout
+        self.calls: list[list[str]] = []
+
+    def __call__(self, args: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
+        self.calls.append(args)
+        if "up" in args:
+            if self.up_timeout:
+                raise subprocess.TimeoutExpired(args, timeout)
+            return _done(args, returncode=1, stderr='service "nats-init" didn\'t complete successfully: exit 1')
+        if "ps" in args:
+            return _done(args, stdout="\n".join(json.dumps(r) for r in self.ps_records))
+        if "logs" in args:
+            return _done(args, returncode=self.logs_rc, stdout=f"output of {args[-1]}\n", stderr="boom")
+        return _done(args)
+
+    def logged(self) -> list[str]:
+        return [call[-1] for call in self.calls if "logs" in call]
+
+
+_UP_PS = [
+    {"Service": "postgres", "Name": "postgres", "State": "running", "Health": "healthy"},
+    {"Service": "nats-init", "Name": "nats-init", "State": "exited", "Health": "", "ExitCode": 1},
+    {"Service": "migrate", "Name": "migrate", "State": "exited", "Health": "", "ExitCode": 0},
+    {"Service": "api", "Name": "api", "State": "running", "Health": "starting"},
+]
+
+
+def test_up_failure_appends_logs_of_containers_not_up() -> None:
+    docker = _FailingUpDocker(_UP_PS)
+    with patch("production_test_framework.compose._run", docker), pytest.raises(RuntimeError) as err:
+        _stack().up()
+    message = str(err.value)
+    assert message.startswith("`docker compose up` failed (rc=1)")
+    assert "--- logs of nats-init (last 200 lines) ---\noutput of nats-init" in message
+    assert "--- logs of api (last 200 lines) ---" in message
+    assert docker.logged() == ["nats-init", "api"]  # healthy and completed containers are skipped
+    assert next(c for c in docker.calls if "logs" in c)[-4:] == ["--no-color", "--tail", "200", "nats-init"]
+
+
+def test_up_timeout_appends_logs() -> None:
+    docker = _FailingUpDocker(_UP_PS, up_timeout=True)
+    with patch("production_test_framework.compose._run", docker), pytest.raises(RuntimeError) as err:
+        _stack().up(wait_timeout=5)
+    assert "timed out after 65s" in str(err.value)
+    assert "--- logs of nats-init" in str(err.value)
+
+
+def test_up_failure_keeps_compose_error_when_logs_fail() -> None:
+    docker = _FailingUpDocker(_UP_PS, logs_rc=1)
+    with patch("production_test_framework.compose._run", docker), pytest.raises(RuntimeError) as err:
+        _stack().up()
+    assert (
+        str(err.value)
+        == '`docker compose up` failed (rc=1):\nservice "nats-init" didn\'t complete successfully: exit 1'
+    )
+
+
+def test_up_failure_without_logs() -> None:
+    docker = _FailingUpDocker(_UP_PS)
+    with patch("production_test_framework.compose._run", docker), pytest.raises(RuntimeError) as err:
+        _stack().up(log_tail=None)
+    assert "--- logs of" not in str(err.value)
+    assert docker.logged() == []
+
+
+def test_ps_reads_exit_code_of_exited_containers() -> None:
+    docker = _FailingUpDocker(_UP_PS)
+    with patch("production_test_framework.compose._run", docker):
+        by_service = {c.service: c for c in _stack().ps()}
+    assert by_service["nats-init"].exit_code == 1 and not by_service["nats-init"].is_completed
+    assert by_service["migrate"].is_completed
+    assert by_service["postgres"].exit_code is None and not by_service["postgres"].is_completed

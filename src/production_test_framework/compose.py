@@ -20,6 +20,12 @@ class ContainerStatus:
     name: str
     state: str
     health: str  # "" when the service declares no healthcheck
+    exit_code: int | None = None  # set by `docker compose ps` once the container has exited
+
+    @property
+    def is_completed(self) -> bool:
+        """An exited one-shot container (an init job, say) that finished successfully."""
+        return self.state == "exited" and self.exit_code == 0
 
     @property
     def is_running(self) -> bool:
@@ -51,11 +57,42 @@ class ComposeStack:
             args += ["--profile", profile]
         return args + list(rest)
 
-    def up(self, *, wait_timeout: int = 180) -> None:
-        """Bring the stack up detached and wait for containers to be up/healthy."""
-        result = _run(self._args("up", "-d", "--wait", "--wait-timeout", str(wait_timeout)), timeout=wait_timeout + 60)
+    def up(self, *, wait_timeout: int = 180, log_tail: int | None = 200) -> None:
+        """Bring the stack up detached and wait for containers to be up/healthy.
+
+        On failure or timeout the error ends with the last log_tail log lines of each container
+        that is not up (None leaves the logs out), so the cause shows in the test output.
+        """
+        args = self._args("up", "-d", "--wait", "--wait-timeout", str(wait_timeout))
+        try:
+            result = _run(args, timeout=wait_timeout + 60)
+        except subprocess.TimeoutExpired as exc:
+            message = f"`docker compose up` timed out after {exc.timeout}s"
+            raise RuntimeError(message + self._failed_container_logs(log_tail)) from exc
         if result.returncode != 0:
-            raise RuntimeError(f"`docker compose up` failed (rc={result.returncode}):\n{result.stderr}")
+            message = f"`docker compose up` failed (rc={result.returncode}):\n{result.stderr}"
+            raise RuntimeError(message + self._failed_container_logs(log_tail))
+
+    def _failed_container_logs(self, tail: int | None) -> str:
+        """Logs of the containers that are not up, for an `up` error. Never raises: "" on any problem."""
+        if tail is None:
+            return ""
+        try:
+            failed = [c.service for c in self.ps() if not (c.is_healthy or c.is_completed)]
+            return "".join(
+                f"\n\n--- logs of {service} (last {tail} lines) ---\n{self.logs(service, tail=tail)}"
+                for service in failed
+            )
+        except RuntimeError, OSError, subprocess.SubprocessError, ValueError:
+            return ""  # keep the original compose error rather than hide it behind a log failure
+
+    def logs(self, *services: str, tail: int | None = None) -> str:
+        """Combined stdout/stderr logs of the given services (all by default), without colors."""
+        rest = ["logs", "--no-color", *(["--tail", str(tail)] if tail is not None else []), *services]
+        result = _run(self._args(*rest), timeout=60)
+        if result.returncode != 0:
+            raise RuntimeError(f"`docker compose logs` failed (rc={result.returncode}):\n{result.stderr}")
+        return result.stdout + result.stderr
 
     def down(self, *, volumes: bool = True) -> None:
         """Tear the stack down, removing orphans (and volumes by default)."""
@@ -143,6 +180,7 @@ class ComposeStack:
                 name=rec.get("Name", ""),
                 state=rec.get("State", ""),
                 health=rec.get("Health", ""),
+                exit_code=rec.get("ExitCode") if rec.get("State") == "exited" else None,
             )
             for rec in records
         ]
