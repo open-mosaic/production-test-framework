@@ -35,6 +35,7 @@ class TestLookupGpu:
             ("rtx-pro-2000-blackwell", "rtx-pro-2000-blackwell"),
             ("NVIDIA H100 80GB HBM3", "h100"),
             ("AMD Instinct MI300X", "mi300x"),
+            ("AMD Radeon AI PRO R9700", "radeon-ai-pro-r9700"),
             ("GB200 NVL72", "gb200"),
         ],
     )

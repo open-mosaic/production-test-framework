@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: FSL-1.1-ALv2
 # Copyright (c) 2026 Delos Data, Inc.
 """
-Power readings on this host: per-GPU power from ``nvidia-smi``, which needs no privileges, and
-whole-server wall power from the BMC through ``ipmitool``, which needs root.
+Power readings on this host: per-GPU power from ``nvidia-smi`` or ``amd-smi``, which need no
+privileges, and whole-server wall power from the BMC through ``ipmitool``, which needs root.
 """
 
 import re
@@ -13,8 +13,11 @@ from dataclasses import dataclass, field
 
 from ..helper import run_command
 from ..host import Host
+from ..vllm.server import AMD, NVIDIA, GpuVendor, amd_smi_number, parse_amd_smi_json
 
 __all__ = [
+    "AMD_GPU_LIMIT_COMMAND",
+    "AMD_GPU_POWER_COMMAND",
     "GPU_POWER_COMMAND",
     "NEEDS_SUDO",
     "SERVER_POWER_COMMAND",
@@ -27,6 +30,8 @@ __all__ = [
 ]
 
 GPU_POWER_COMMAND = ("nvidia-smi", "--query-gpu=power.draw,power.limit", "--format=csv,noheader,nounits")
+AMD_GPU_POWER_COMMAND = ("amd-smi", "metric", "--power", "--json")
+AMD_GPU_LIMIT_COMMAND = ("amd-smi", "static", "--limit", "--json")
 SERVER_POWER_COMMAND = ("sudo", "ipmitool", "dcmi", "power", "reading")
 
 DEFAULT_SAMPLE_INTERVAL = 5.0
@@ -51,8 +56,10 @@ def _argv(command: tuple[str, ...], host: Host | None) -> list[str]:
     return host.argv(command) if host else list(command)
 
 
-def gpu_power_watts(host: Host | None = None) -> list[tuple[float, float]]:
-    """``(draw, limit)`` watts for each NVIDIA GPU on *host*, else this machine."""
+def gpu_power_watts(host: Host | None = None, vendor: GpuVendor = NVIDIA) -> list[tuple[float, float | None]]:
+    """``(draw, limit)`` watts for each of *vendor*'s GPUs on *host*, else this machine; limit None if unknown."""
+    if vendor is AMD:
+        return _amd_power_watts(host)
     command = shlex.join(GPU_POWER_COMMAND)
     result = run_command(_argv(GPU_POWER_COMMAND, host), timeout=15)
     if not result.success:
@@ -66,6 +73,36 @@ def gpu_power_watts(host: Host | None = None) -> list[tuple[float, float]]:
         readings.append((draw, limit))
     if not readings:
         raise PowerReadingUnavailable(command, "reported no GPU power")
+    return readings
+
+
+def _amd_json(command: tuple[str, ...], host: Host | None) -> dict[int, dict]:
+    """amd-smi's JSON for *command*, by GPU index."""
+    result = run_command(_argv(command, host), timeout=15)
+    if not result.success:
+        raise PowerReadingUnavailable(shlex.join(command), result.stderr or f"exit status {result.returncode}")
+    try:
+        entries = parse_amd_smi_json(result.stdout)
+    except ValueError as exc:
+        raise PowerReadingUnavailable(shlex.join(command), str(exc)) from exc
+    return {entry["gpu"]: entry for entry in entries if "gpu" in entry}
+
+
+def _amd_power_watts(host: Host | None) -> list[tuple[float, float | None]]:
+    """Each AMD GPU's socket power, and its power cap, from amd-smi."""
+    power = _amd_json(AMD_GPU_POWER_COMMAND, host)
+    limits = _amd_json(AMD_GPU_LIMIT_COMMAND, host)
+    readings = []
+    for index, entry in sorted(power.items()):
+        reading = entry.get("power") or {}
+        draw = amd_smi_number(reading.get("socket_power") or reading.get("average_socket_power"))
+        if draw is None:
+            continue
+        limit = (limits.get(index) or {}).get("limit") or {}
+        cap = (limit.get("ppt0") or {}).get("socket_power_limit") or limit.get("max_power") or limit.get("power_cap")
+        readings.append((draw, amd_smi_number(cap)))
+    if not readings:
+        raise PowerReadingUnavailable(shlex.join(AMD_GPU_POWER_COMMAND), "reported no GPU power")
     return readings
 
 
@@ -112,9 +149,11 @@ class PowerSampler:
         server_unavailable: str | None = None,
         interval: float = DEFAULT_SAMPLE_INTERVAL,
         host: Host | None = None,
+        vendor: GpuVendor = NVIDIA,
     ):
         self._server = server
         self._host = host
+        self._vendor = vendor
         self._server_unavailable = server_unavailable
         self._interval = interval
         self._stop = threading.Event()
@@ -129,10 +168,10 @@ class PowerSampler:
     def _sample(self) -> None:
         self._samples += 1
         try:
-            readings = gpu_power_watts(self._host)
+            readings = gpu_power_watts(self._host, self._vendor)
             self._gpu_count = len(readings)
             self._gpu.append(statistics.mean(draw for draw, _ in readings))
-            self._limits = [limit for _, limit in readings]
+            self._limits = [limit for _, limit in readings if limit is not None]
         except PowerReadingUnavailable as exc:
             self._errors.setdefault("gpu", str(exc))
         if self._server:

@@ -16,8 +16,18 @@ from production_test_framework.agentx.power import (
     server_power_watts,
 )
 from production_test_framework.host import Host
-from production_test_framework.reporting.agentx import power_summary_rows
+from production_test_framework.reporting.power import power_summary_rows
 from production_test_framework.ssh import CommandResult
+from production_test_framework.vllm.server import AMD
+
+AMD_POWER = """{"gpu_data": [
+  {"gpu": 0, "power": {"socket_power": {"value": 16, "unit": "W"}}},
+  {"gpu": 1, "power": {"socket_power": {"value": 210, "unit": "W"}}}
+]}"""
+AMD_LIMIT = """{"gpu_data": [
+  {"gpu": 0, "limit": {"ppt0": {"socket_power_limit": {"value": 300, "unit": "W"}}}},
+  {"gpu": 1, "limit": {"ppt0": {"socket_power_limit": "N/A"}}}
+]}"""
 
 DCMI_OUTPUT = """
     Instantaneous power reading:                   225 Watts
@@ -42,6 +52,18 @@ class TestGpuPower:
             with pytest.raises(PowerReadingUnavailable) as exc:
                 gpu_power_watts()
         assert exc.value.command.startswith("nvidia-smi")
+
+    def test_reads_amd_socket_power_and_its_limit(self):
+        with _patched(CommandResult(0, AMD_POWER, ""), CommandResult(0, AMD_LIMIT, "")) as run:
+            assert gpu_power_watts(vendor=AMD) == [(16.0, 300.0), (210.0, None)]
+        assert run.call_args_list[0].args[0][:3] == ["amd-smi", "metric", "--power"]
+
+    def test_the_sampler_reads_its_vendors_gpus(self):
+        sampler = PowerSampler(vendor=AMD)
+        with _patched(CommandResult(0, AMD_POWER, ""), CommandResult(0, AMD_LIMIT, "")):
+            sampler._sample()
+        summary = sampler.stop()
+        assert (summary.gpu_count, summary.gpu_avg_w, summary.gpu_limit_w) == (2, 113, 300)
 
 
 class TestServerPower:

@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from production_test_framework.reporting import agentx as report_agentx
-from production_test_framework.reporting.formatting import ReportFormat
+from production_test_framework.reporting.formatting import ReportFormat, format_for_unit
 from production_test_framework.reporting.report import Reporter
 from production_test_framework.ssh import CommandResult
 from production_test_framework.workload.agentx_workload import (
@@ -356,11 +356,11 @@ class TestFormatForUnit:
         ],
     )
     def test_token_rates_keep_one_place_and_dollars_two(self, value, unit, shown):
-        assert report_agentx.format_for_unit(value, unit) == shown
+        assert format_for_unit(value, unit) == shown
 
     def test_other_units_are_unchanged(self):
-        assert report_agentx.format_for_unit(1.6530, "J/tok") == "1.653"
-        assert report_agentx.format_for_unit(6994670.82, "tok/$") == "6,994,670.82"
+        assert format_for_unit(1.6530, "J/tok") == "1.653"
+        assert format_for_unit(6994670.82, "tok/$") == "6,994,670.82"
 
 
 class TestExitSummary:

@@ -252,7 +252,8 @@ def _section(vllm_args: dict[str, Any]) -> str:
 def _commented_out(vllm_args: dict[str, Any], rope_key: str) -> str:
     """The profile's vllm_args with its RoPE override, and any key left empty by it, commented out."""
     hf_overrides = vllm_args["hf_overrides"]
-    hf_left = {key: value for key, value in hf_overrides.items() if key != rope_key}
+    override = (rope_key, "max_position_embeddings")
+    hf_left = {key: value for key, value in hf_overrides.items() if key not in override}
     args_left = len(vllm_args) > 1 or hf_left
     lines = [("" if args_left else "# ") + "vllm_args:"]
     for key, value in vllm_args.items():
@@ -262,7 +263,7 @@ def _commented_out(vllm_args: dict[str, Any], rope_key: str) -> str:
         lines.append(("  " if hf_left else "# ") + ("hf_overrides:" if hf_left else "  hf_overrides:"))
         for sub_key, sub_value in hf_overrides.items():
             sub_lines = _yaml({sub_key: sub_value}, 4)
-            lines += [f"# {line}" if sub_key == rope_key else line for line in sub_lines]
+            lines += [f"# {line}" if sub_key in override else line for line in sub_lines]
     return "\n".join(lines)
 
 
@@ -311,6 +312,8 @@ def rope_override_problem(
                     "original_max_position_embeddings": native,
                     "rope_theta": config.get("rope_theta", 10000),
                 },
+                # Newer vLLM (0.32; not 0.23) takes YaRN's stretched length from here, not from factor.
+                "max_position_embeddings": max_model_len,
             },
         }
         reachable = native >= min_context

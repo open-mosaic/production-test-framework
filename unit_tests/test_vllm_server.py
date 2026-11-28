@@ -10,11 +10,14 @@ import pytest
 from production_test_framework.ssh import CommandResult
 from production_test_framework.vllm import server
 from production_test_framework.vllm.server import (
+    AMD,
+    NVIDIA,
     Pool,
     VllmDeployment,
     VllmError,
     aggregated_workers,
     check_docker,
+    detect_gpus,
     disaggregated_workers,
     gpu_memory,
     hf_cache,
@@ -22,6 +25,13 @@ from production_test_framework.vllm.server import (
 )
 
 OK = CommandResult(0, "", "")
+
+#: ``amd-smi static --asic --vram --json`` as amd-smi 26 prints it, for two GPUs.
+AMD_SMI_STATIC = """{"gpu_data": [
+  {"gpu": 0, "asic": {"market_name": "AMD Radeon AI PRO R9700"}, "vram": {"size": {"value": 32624, "unit": "MB"}}},
+  {"gpu": 1, "asic": {"market_name": "AMD Radeon AI PRO R9700"}, "vram": {"size": {"value": 32624, "unit": "MB"}}}
+]}"""
+NO_NVIDIA_DRIVER = CommandResult(9, "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.", "")
 
 
 class FakeHost:
@@ -86,9 +96,43 @@ class TestPrerequisites:
         with pytest.raises(VllmError, match="No GPU driver found on this host"):
             gpu_memory(FakeHost(tools=()))
 
-    def test_amd_is_not_supported_yet(self):
-        with pytest.raises(VllmError, match="has AMD GPUs"):
-            gpu_memory(FakeHost(tools=("amd-smi",)))
+    def test_amd_gpus_from_amd_smi(self):
+        host = FakeHost(tools=("amd-smi",), replies={"amd-smi": CommandResult(0, AMD_SMI_STATIC, "")})
+        found = detect_gpus(host)
+        assert found.vendor is AMD and found.name == "AMD Radeon AI PRO R9700"
+        assert found.memory == {0: 32624 * 1024**2, 1: 32624 * 1024**2}
+
+    def test_older_amd_smi_prints_a_bare_list_after_a_warning(self):
+        entries = AMD_SMI_STATIC.removeprefix('{"gpu_data": ').removesuffix("}")
+        host = FakeHost(tools=("amd-smi",), replies={"amd-smi": CommandResult(0, "WARNING: x\n" + entries, "")})
+        assert detect_gpus(host).memory == {0: 32624 * 1024**2, 1: 32624 * 1024**2}
+
+    def test_nvidia_smi_without_nvidia_gpus_falls_back_to_amd(self):
+        host = FakeHost(
+            tools=("nvidia-smi", "amd-smi"),
+            replies={"nvidia-smi": NO_NVIDIA_DRIVER, "amd-smi": CommandResult(0, AMD_SMI_STATIC, "")},
+        )
+        assert detect_gpus(host).vendor is AMD
+
+    def test_nvidia_is_used_when_it_lists_gpus(self):
+        host = FakeHost(
+            tools=("nvidia-smi", "amd-smi"),
+            replies={
+                "nvidia-smi": CommandResult(0, "0, NVIDIA RTX PRO 2000, 16384", ""),
+                "amd-smi": CommandResult(0, AMD_SMI_STATIC, ""),
+            },
+        )
+        assert detect_gpus(host).vendor is NVIDIA
+
+    def test_neither_vendor_listing_gpus_says_what_to_check_for_both(self):
+        host = FakeHost(
+            tools=("nvidia-smi", "amd-smi"),
+            replies={"nvidia-smi": NO_NVIDIA_DRIVER, "amd-smi": CommandResult(0, '{"gpu_data": []}', "")},
+        )
+        with pytest.raises(
+            VllmError, match="NVIDIA driver.*amd-smi works but lists no GPUs.*NVIDIA Container.*/dev/kfd"
+        ):
+            detect_gpus(host)
 
     def test_nvidia_smi_failing_says_what_to_check(self):
         host = FakeHost(replies={"nvidia-smi": CommandResult(9, "", "NVML: Driver Not Loaded")})
@@ -96,7 +140,9 @@ class TestPrerequisites:
             gpu_memory(host)
 
     def test_memory_by_index(self):
-        host = FakeHost(replies={"nvidia-smi": CommandResult(0, "0, 16384\n1, 16384", "")})
+        host = FakeHost(
+            replies={"nvidia-smi": CommandResult(0, "0, NVIDIA RTX PRO 2000, 16384\n1, NVIDIA RTX PRO 2000, 16384", "")}
+        )
         assert gpu_memory(host) == {0: 16 * 1024**3, 1: 16 * 1024**3}
 
     def test_docker_without_the_group(self):
@@ -126,7 +172,31 @@ class TestDeployment:
         (run,) = host.docker_runs()
         assert run[run.index("--gpus") + 1] == '"device=0,1"'
         assert run[-1] == "vllm serve acme/model --port 8080 --tensor-parallel-size 2 --max-model-len 65536"
+        assert run[run.index("--entrypoint") + 1] == "/bin/bash"
+        assert run[-3:-1] == ["openmosaic/mosaic-vllm:latest", "-c"]
         assert deployment.worker_containers == deployment.containers
+
+    def test_amd_gets_the_rocm_devices_and_image(self, tmp_path):
+        host = FakeHost()
+        _deployment(host, aggregated_workers(8080, 2), log_dir=tmp_path, vendor=AMD).start()
+        (run,) = host.docker_runs()
+        assert "--gpus" not in run
+        assert run[run.index("--device") + 1] == "/dev/kfd" and "HIP_VISIBLE_DEVICES=0,1" in run
+        assert run[run.index("--pid") + 1] == "host"
+        assert AMD.image in run
+
+    def test_an_image_given_replaces_the_vendors(self, tmp_path):
+        host = FakeHost()
+        _deployment(host, aggregated_workers(8080, 1), log_dir=tmp_path, vendor=AMD, image="rocm/vllm:rdna").start()
+        (run,) = host.docker_runs()
+        assert "rocm/vllm:rdna" in run and AMD.image not in run
+
+    def test_env_given_is_set_in_the_container(self, tmp_path):
+        host = FakeHost()
+        env = {"HSA_ENABLE_IPC_MODE_LEGACY": 0}
+        _deployment(host, aggregated_workers(8080, 1), log_dir=tmp_path, vendor=AMD, env=env).start()
+        (run,) = host.docker_runs()
+        assert run[run.index("HSA_ENABLE_IPC_MODE_LEGACY=0") - 1] == "--env"
 
     def test_disaggregated_starts_the_router_after_the_workers(self, tmp_path):
         host = FakeHost(local=False)

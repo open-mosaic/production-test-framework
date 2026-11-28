@@ -165,3 +165,13 @@ mi350x:
   rental_cost_per_hour: 3.40
   cost_source: "estimate: market rental, October 2026"
   aliases: [instinct-mi350x]
+radeon-ai-pro-r9700:
+  label: Radeon AI PRO R9700
+  vendor: AMD
+  # Its board power limit, as amd-smi static --limit reports it.
+  tdp_w: 300
+  owning_cost_per_hour: null
+  # GBP 199/month for a dedicated single-R9700 server, at the page's GBP 1 = USD 1.26, over 720 h.
+  rental_cost_per_hour: 0.35
+  cost_source: "gigagpu.com/cost-per-million-tokens: dedicated server rental, November 2026"
+  aliases: [r9700]

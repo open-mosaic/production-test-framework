@@ -77,6 +77,11 @@ class Workload(ABC):
     def get_result(self) -> WorkloadResult:
         """Get the result of the workload"""
 
+    def stop_if_running(self) -> None:
+        """Stop the workload if it is still running, as a test's teardown does."""
+        if self.status == WorkloadStatus.RUNNING:
+            self.stop()
+
     def wait_for_completion(self, timeout: float = 300, poll_interval: float = 2.0):
         """Wait for the workload to complete"""
         return wait_for(

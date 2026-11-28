@@ -13,15 +13,14 @@ from a venv of their own (:class:`AgentxHarness`).
 import json
 import os
 import re
-import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from production_test_framework.ssh import CommandResult
-from production_test_framework.workload.command_workload import CommandWorkload
+from production_test_framework.workload.harness import HarnessInstallError, HarnessWorkload, VenvHarness, tail
 from production_test_framework.workload.inferencex_workload import benchmark_option_argv
 
 __all__ = [
@@ -80,26 +79,24 @@ sys.argv = ["aiperf", "plot", *sys.argv[1:]]
 app()
 """
 
-INSTALL_TIMEOUT = 1800.0
 SCORING_TIMEOUT = 900.0
 PLOT_TIMEOUT = 900.0
 
 
-class AgentxInstallError(RuntimeError):
+class AgentxInstallError(HarnessInstallError):
     """The harness could not be installed; the message names the step and its output."""
 
 
-def _tail(text: str, lines: int = 25) -> str:
-    return "\n".join((text or "").strip().splitlines()[-lines:])
-
-
 @dataclass(frozen=True)
-class AgentxHarness:
+class AgentxHarness(VenvHarness):
     """The pinned harness and InferenceX checkouts under *root*, and the venv they run in."""
 
     root: Path = DEFAULT_AGENTX_HOME
     harness_ref: str = HARNESS_REF
     inferencex_ref: str = INFERENCEX_REF
+
+    name: ClassVar[str] = "AgentX"
+    install_error: ClassVar[type[HarnessInstallError]] = AgentxInstallError
 
     @property
     def harness_dir(self) -> Path:
@@ -110,31 +107,15 @@ class AgentxHarness:
         return self.root / "InferenceX"
 
     @property
-    def venv(self) -> Path:
-        return self.root / "venv"
-
-    @property
-    def python(self) -> Path:
-        return self.venv / "bin" / "python"
-
-    @property
     def aiperf(self) -> Path:
         return self.venv / "bin" / "aiperf"
 
     @property
-    def marker(self) -> Path:
-        return self.root / "installed.json"
+    def entry_point(self) -> Path:
+        return self.aiperf
 
     def _wanted(self) -> dict[str, str]:
         return {"harness": self.harness_ref, "inferencex": self.inferencex_ref, "python": PYTHON_VERSION}
-
-    def is_installed(self) -> bool:
-        """True when the venv exists and was built from the refs this harness pins."""
-        try:
-            recorded = json.loads(self.marker.read_text(encoding="utf-8"))
-        except OSError, ValueError:
-            return False
-        return recorded == self._wanted() and self.aiperf.is_file()
 
     def install(self) -> bool:
         """
@@ -144,65 +125,18 @@ class AgentxHarness:
         """
         if self.is_installed():
             return False
-
-        uv = shutil.which("uv")
-        if uv is None:
-            raise AgentxInstallError("uv is not on PATH; it is needed to build the AgentX venv")
-
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.marker.unlink(missing_ok=True)
-
+        uv = self._start_install()
         self._checkout(HARNESS_REPO, self.harness_dir, self.harness_ref)
         self._checkout(
             INFERENCEX_REPO, self.inferencex_dir, self.inferencex_ref, sparse=f"{INFERENCEX_PACKAGE_ROOT}/infx"
         )
-
-        shutil.rmtree(self.venv, ignore_errors=True)
-        _run_step("create the venv", [uv, "venv", "--python", PYTHON_VERSION, str(self.venv)])
-        _run_step(
-            "install the harness",
-            [uv, "pip", "install", "--python", str(self.python), "-e", str(self.harness_dir), *EXTRA_REQUIREMENTS],
-            env={**os.environ, "UV_HTTP_TIMEOUT": "120"},
+        self._build_venv(
+            uv, PYTHON_VERSION, ("install the harness", ["-e", str(self.harness_dir), *EXTRA_REQUIREMENTS])
         )
         if not self.aiperf.is_file():
             raise AgentxInstallError(f"the harness installed, but {self.aiperf} is missing")
-
-        self.marker.write_text(json.dumps(self._wanted(), indent=2) + "\n", encoding="utf-8")
+        self._finish_install()
         return True
-
-    def _checkout(self, repo: str, directory: Path, ref: str, *, sparse: str | None = None) -> None:
-        """Clone *repo* blobless into *directory* if needed, then detach at *ref*."""
-        git = ["git", "-C", str(directory)]
-        if not (directory / ".git").is_dir():
-            shutil.rmtree(directory, ignore_errors=True)
-            clone = [
-                "git",
-                "clone",
-                "--filter=blob:none",
-                "--no-checkout",
-                "--quiet",
-                *(["--sparse"] if sparse else []),
-            ]
-            _run_step(f"clone {repo}", [*clone, repo, str(directory)])
-            if sparse:
-                _run_step(f"limit {directory.name} to {sparse}", [*git, "sparse-checkout", "set", sparse])
-
-        known = subprocess.run([*git, "cat-file", "-e", f"{ref}^{{commit}}"], capture_output=True)
-        if known.returncode != 0:
-            _run_step(f"fetch {ref} into {directory.name}", [*git, "fetch", "--quiet", "origin", ref])
-        _run_step(f"check out {ref} in {directory.name}", [*git, "checkout", "--quiet", "--detach", ref])
-
-
-def _run_step(step: str, argv: list[str], env: Mapping[str, str] | None = None) -> None:
-    """Run one install step, raising :class:`AgentxInstallError` with its output on failure."""
-    try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=INSTALL_TIMEOUT, env=env)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AgentxInstallError(f"AgentX install could not {step}: {exc}") from exc
-    if done.returncode != 0:
-        raise AgentxInstallError(
-            f"AgentX install could not {step} (exit status {done.returncode}):\n{_tail(done.stderr or done.stdout)}"
-        )
 
 
 def find_artifacts(artifact_dir: Path) -> Path:
@@ -301,7 +235,7 @@ class AgentxResult:
         return (self.aggregate.get("metadata") or {}).get("dataset") or {}
 
 
-class AgentxWorkload(CommandWorkload):
+class AgentxWorkload(HarnessWorkload):
     """
     One AgentX point, one concurrency against one server, run as ``aiperf profile``.
 
@@ -313,6 +247,7 @@ class AgentxWorkload(CommandWorkload):
     """
 
     workload_name = "AgentX"
+    log_name = "aiperf.log"
 
     def __init__(
         self,
@@ -326,9 +261,7 @@ class AgentxWorkload(CommandWorkload):
         browser_path: str | None = None,
         server_log: Callable[[], Sequence[str]] | None = None,
     ):
-        super().__init__(timeout=timeout)
-        self._harness = harness
-        self._run_dir = Path(run_dir)
+        super().__init__(harness=harness, run_dir=run_dir, timeout=timeout)
         self._options = {**aiperf_options, "output_artifact_dir": str(self.artifact_dir)}
         self._scoring_env = dict(scoring_env or {})
         self._plots = plots
@@ -348,35 +281,15 @@ class AgentxWorkload(CommandWorkload):
         return self._harness
 
     @property
-    def run_dir(self) -> Path:
-        return self._run_dir
-
-    @property
     def artifact_dir(self) -> Path:
         return self._run_dir / "aiperf_artifacts"
 
-    @property
-    def log_path(self) -> Path:
-        return self._run_dir / "aiperf.log"
-
     def build_command(self) -> list[str]:
-        self._run_dir.mkdir(parents=True, exist_ok=True)
-        argv = [str(self._harness.aiperf), "profile", *benchmark_option_argv(self._options)]
-        (self._run_dir / "benchmark_command.txt").write_text(" ".join(argv) + "\n", encoding="utf-8")
-        return argv
+        return self._record_command([str(self._harness.aiperf), "profile", *benchmark_option_argv(self._options)])
 
     def command_env(self) -> dict[str, str]:
         # A cached dataset is announced before aiperf's record processor subscribes, which then never scores a record.
         return {**os.environ, "AIPERF_DATASET_MMAP_CACHE_ENABLED": "false"}
-
-    def _save_log(self, result: CommandResult) -> None:
-        self._run_dir.mkdir(parents=True, exist_ok=True)
-        stderr = f"\n--- stderr ---\n{result.stderr}" if result.stderr else ""
-        self.log_path.write_text((result.stdout or "") + stderr, encoding="utf-8")
-
-    def _failure_detail(self, result: CommandResult) -> str:
-        self._save_log(result)
-        return super()._failure_detail(result)
 
     def _run_command_sync(self) -> AgentxResult:
         # aiperf exits non-zero when too many requests failed, after writing a complete result.
@@ -404,11 +317,6 @@ class AgentxWorkload(CommandWorkload):
             outcome.plots, outcome.plot_error = self._plot(artifacts)
         return outcome
 
-    def _venv_run(self, argv: list[str], timeout: float, **env: str) -> subprocess.CompletedProcess:
-        environ = {**os.environ, **env}
-        environ.pop("VIRTUAL_ENV", None)
-        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=environ, cwd=self._run_dir)
-
     def _score(self) -> tuple[dict[str, Any] | None, str]:
         """InferenceX's AgentX aggregate, or ``(None, reason)`` when it could not be built."""
         logs = [log for log in (self._server_log() if self._server_log else []) if log]
@@ -435,7 +343,7 @@ class AgentxWorkload(CommandWorkload):
         if done.returncode != 0:
             return (
                 None,
-                f"InferenceX scoring failed (exit status {done.returncode}):\n{_tail(done.stderr or done.stdout)}",
+                f"InferenceX scoring failed (exit status {done.returncode}):\n{tail(done.stderr or done.stdout)}",
             )
         try:
             return json.loads((self._run_dir / f"{RESULT_FILENAME}.json").read_text(encoding="utf-8")), ""
@@ -454,6 +362,6 @@ class AgentxWorkload(CommandWorkload):
             return [], f"aiperf plot did not run: {exc}"
         plots = sorted(output.glob("*.png")) if output.is_dir() else []
         if done.returncode != 0 or not plots:
-            detail = _tail(done.stdout + done.stderr, 8)
+            detail = tail(done.stdout + done.stderr, 8)
             return plots, f"aiperf plot produced {len(plots)} plot(s) (exit status {done.returncode}):\n{detail}"
         return plots, ""

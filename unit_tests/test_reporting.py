@@ -10,6 +10,7 @@ import pytest
 from production_test_framework.reporting.assets import Logo, load_logo
 from production_test_framework.reporting.charts import MIN_BARS, latency_percentile_figure
 from production_test_framework.reporting.environment import (
+    amd_rows,
     benchmark_option_rows,
     command_output,
     display_path,
@@ -665,3 +666,20 @@ class TestDisplayPath:
     def test_repo_relative_when_run_from_outside_the_checkout(self, checkout, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         assert display_path(checkout / "suite" / "build") == "repo/suite/build"
+
+
+class TestAmdRows:
+    VERSION = "AMDSMI Tool: 26.2.1+unknown | AMDSMI Library version: 26.2.1 | ROCm version: N/A | amdgpu version: x"
+    STATIC = (
+        '{"gpu_data": [{"gpu": 0, "asic": {"market_name": "AMD Radeon AI PRO R9700"}}, '
+        '{"gpu": 1, "asic": {"market_name": "AMD Radeon AI PRO R9700"}}]}'
+    )
+
+    def test_names_the_tool_and_gpus_leaving_out_an_unknown_rocm(self):
+        assert amd_rows(self.VERSION, self.STATIC, "this host") == [
+            ["amd-smi version (this host)", "26.2.1+unknown"],
+            ["GPUs (this host)", "2x AMD Radeon AI PRO R9700"],
+        ]
+
+    def test_no_amd_gpus_is_no_rows(self):
+        assert amd_rows("", "", "this host") == []

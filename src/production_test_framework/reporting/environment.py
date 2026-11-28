@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ..helper import is_localhost, run_command
+from ..vllm.server import parse_amd_smi_json
 
 __all__ = [
     "benchmark_option_rows",
@@ -135,7 +136,7 @@ def run_rows(config, checkout: Path | str | None = None) -> list[list[str]]:
 
 
 # =============================================================================
-# GPU, CUDA and kernel-module versions, collected over SSH
+# GPU, CUDA (or ROCm) and kernel-module versions, collected over SSH
 # =============================================================================
 
 
@@ -172,8 +173,30 @@ def parse_driver_versions(version_text: str) -> dict[str, str]:
 _GPU_INFO_SCRIPT = (
     "nvidia-smi --version 2>/dev/null || nvidia-smi 2>/dev/null; "
     "echo '===KMD==='; cat /proc/driver/nvidia/version 2>/dev/null; "
-    "echo '===GPUS==='; nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2>/dev/null"
+    "echo '===GPUS==='; nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2>/dev/null; "
+    "echo '===AMD==='; amd-smi version 2>/dev/null; "
+    "echo '===AMDGPUS==='; amd-smi static --asic --json 2>/dev/null"
 )
+
+
+def amd_rows(version_text: str, inventory: str, label: str) -> list[list[str]]:
+    """
+    amd-smi's and ROCm's versions from ``amd-smi version``, and the GPUs from
+    ``amd-smi static --asic --json``; empty when amd-smi listed no GPUs.
+    """
+    try:
+        gpus = parse_amd_smi_json(inventory)
+    except ValueError:
+        return []
+    names = [str((gpu.get("asic") or {}).get("market_name") or "AMD GPU") for gpu in gpus]
+    if not names:
+        return []
+    rows = []
+    for name, pattern in (("amd-smi", r"AMDSMI Tool:\s*([^\s|]+)"), ("ROCm", r"ROCm version:\s*([^\s|]+)")):
+        if (match := re.search(pattern, version_text)) and match.group(1) != "N/A":
+            rows.append([f"{name} version ({label})", match.group(1)])
+    rows.append([f"GPUs ({label})", f"{len(names)}x {', '.join(sorted(set(names)))}"])
+    return rows
 
 
 def ssh_target(host: str) -> str:
@@ -206,7 +229,7 @@ def _remote_output(host: str, script: str, timeout: float = 25.0) -> tuple[str |
 
 def gpu_rows(host: str | None) -> list[list[str]]:
     """
-    GPU, CUDA and kernel-module versions from *host*.
+    GPU, CUDA and kernel-module versions from *host*, or amd-smi's and ROCm's when it has AMD GPUs.
     """
     host = os.getenv("GPU_INFO_HOST") or host
     if not host:
@@ -230,7 +253,8 @@ def gpu_rows(host: str | None) -> list[list[str]]:
         )
         return [["GPU driver", f"not collected -- ssh {ssh_target(host)}: {detail}.{hint}"]]
 
-    version_text, _, rest = output.partition("===KMD===")
+    nvidia_text, _, amd_text = output.partition("===AMD===")
+    version_text, _, rest = nvidia_text.partition("===KMD===")
     kmd_text, _, inventory = rest.partition("===GPUS===")
 
     versions = parse_driver_versions(version_text)
@@ -249,9 +273,12 @@ def gpu_rows(host: str | None) -> list[list[str]]:
     if gpu_lines:
         names = sorted({line.split(",", 2)[1].strip() for line in gpu_lines})
         rows.append([f"GPUs ({label})", f"{len(gpu_lines)}x {', '.join(names)}"])
+    else:
+        amd_version, _, amd_inventory = amd_text.partition("===AMDGPUS===")
+        rows += amd_rows(amd_version, amd_inventory, label)
 
     if not rows:
-        rows.append(["GPU driver", f"not collected -- {label} answered but reported no NVIDIA driver"])
+        rows.append(["GPU driver", f"not collected -- {label} answered but reported no NVIDIA or AMD GPUs"])
     return rows
 
 

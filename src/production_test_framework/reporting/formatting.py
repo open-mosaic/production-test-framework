@@ -8,8 +8,10 @@ import html
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 __all__ = [
     "COMPACT_DECIMALS",
@@ -17,8 +19,10 @@ __all__ = [
     "STATUS_CLASS",
     "ReportFormat",
     "Table",
+    "format_cell",
     "format_delta",
     "format_duration",
+    "format_for_unit",
     "format_number",
     "format_value",
     "md_escape",
@@ -102,6 +106,37 @@ def format_number(value: float | None, spec: str | None = None, significant: int
     if value is None:
         return "-"
     return f"{value:{spec}}" if spec else _format_decimal(value, significant)
+
+
+def _unit_decimals(unit: str) -> int | None:
+    """Decimal places shown for *unit*: 1 for a token rate, 2 for a dollar amount."""
+    if unit.startswith("$"):
+        return 2
+    if "tok/s" in unit or "tokens/sec" in unit:
+        return 1
+    return None
+
+
+def format_for_unit(value: float, unit: str = "", significant: int | None = None) -> str:
+    """*value* rounded, halves up, to its unit's decimal places, or as :func:`format_number` shows it."""
+    places = _unit_decimals(unit)
+    if places is None:
+        return format_number(value, significant=significant)
+    rounded = Decimal(repr(float(value))).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    return f"{rounded:,.{places}f}"
+
+
+def format_cell(value: Any, unit: str = "") -> str:
+    """A table cell for any value: "-" for None, true/false, a number for its *unit*, a list joined."""
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return format_for_unit(value, unit)
+    if isinstance(value, list):
+        return ", ".join(format_cell(item) for item in value) or "-"
+    return str(value)
 
 
 def format_duration(seconds: float | None) -> str:

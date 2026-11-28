@@ -149,7 +149,10 @@ class TestShortfalls:
         )
 
 
-YARN = {"rope_parameters": {"rope_type": "yarn", "factor": 2.0, "original_max_position_embeddings": 32768}}
+YARN = {
+    "rope_parameters": {"rope_type": "yarn", "factor": 2.0, "original_max_position_embeddings": 32768},
+    "max_position_embeddings": 65536,
+}
 
 
 def _footprint(**config):
@@ -168,7 +171,8 @@ class TestRopeOverride:
         assert "Comment out (or delete) these lines in agentx/muscae.yaml" in message
         assert message.endswith(
             "# vllm_args:\n#   hf_overrides:\n#     rope_parameters: "
-            "{rope_type: yarn, factor: 2.0, original_max_position_embeddings: 32768}"
+            "{rope_type: yarn, factor: 2.0, original_max_position_embeddings: 32768}\n"
+            "#     max_position_embeddings: 65536"
         )
 
     def test_other_flags_stay_when_the_override_is_commented_out(self):
@@ -177,7 +181,8 @@ class TestRopeOverride:
         )
         assert message.endswith(
             "vllm_args:\n  max_num_seqs: 16\n#   hf_overrides:\n#     rope_parameters: "
-            "{rope_type: yarn, factor: 2.0, original_max_position_embeddings: 32768}"
+            "{rope_type: yarn, factor: 2.0, original_max_position_embeddings: 32768}\n"
+            "#     max_position_embeddings: 65536"
         )
 
     def test_a_short_context_model_without_an_override_is_told_the_lines_to_add(self):
@@ -187,7 +192,7 @@ class TestRopeOverride:
         assert "handles 40,960 tokens on its own, less than max_model_len 65,536" in message
         assert (
             "vllm_args:\n  hf_overrides:\n    rope_parameters: {rope_type: yarn, factor: 1.6, "
-            "original_max_position_embeddings: 40960, rope_theta: 1000000}"
+            "original_max_position_embeddings: 40960, rope_theta: 1000000}\n    max_position_embeddings: 65536"
         ) in message
         assert "max_model_len it reaches" not in message, "40,960 is under the 44,048 AgentX needs"
 

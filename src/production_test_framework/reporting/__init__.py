@@ -20,6 +20,8 @@ The submodules are layered so a caller only imports what it needs:
 * :mod:`~.environment` -- rows describing the runner, the checkout, the GPUs and the profile.
 * :mod:`~.workload` -- the configuration and result tables for a finished workload.
 * :mod:`~.agentx` -- the configuration, result tables and plots of an AgentX run.
+* :mod:`~.mlperf` -- the configuration and result tables of an MLPerf run.
+* :mod:`~.power` -- the power measured during a run.
 * :mod:`~.assets` -- the header logo, embedded into the report file itself.
 """
 
@@ -43,14 +45,18 @@ from .formatting import (
     SIGNIFICANT_DECIMALS,
     ReportFormat,
     Table,
+    format_cell,
     format_delta,
     format_duration,
+    format_for_unit,
     format_number,
     format_value,
     render_table,
     render_table_html,
     render_table_markdown,
 )
+from .mlperf import report_mlperf_configuration, report_mlperf_result
+from .power import power_summary_rows, report_power
 from .report import DEFAULT_TITLE, Reporter
 from .report_plugin import ReportPlugin
 from .workload import report_workload_result, traffic_shape, workload_label
@@ -68,13 +74,16 @@ __all__ = [
     "ci_rows",
     "command_output",
     "display_path",
+    "format_cell",
     "format_delta",
     "format_duration",
+    "format_for_unit",
     "format_number",
     "format_value",
     "git_rows",
     "gpu_rows",
     "load_logo",
+    "power_summary_rows",
     "profile_host",
     "profile_rows",
     "render_table",
@@ -82,6 +91,9 @@ __all__ = [
     "render_table_markdown",
     "report_agentx_configuration",
     "report_agentx_result",
+    "report_mlperf_configuration",
+    "report_mlperf_result",
+    "report_power",
     "report_workload_result",
     "run_rows",
     "runner_rows",

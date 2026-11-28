@@ -7,7 +7,6 @@ Report an AgentX run: the options it ran with, every metric it produced, and its
 import base64
 import html
 from collections.abc import Collection, Iterator, Mapping, Sequence
-from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +16,8 @@ from ..workload.agentx_workload import AgentxResult, AgentxWorkload
 from ..workload.workload import WorkloadResult
 from .charts import latency_percentile_figure, scatter_figure
 from .environment import benchmark_option_rows, display_path
-from .formatting import format_duration, format_number
+from .formatting import format_cell, format_duration, format_for_unit, format_number
+from .power import report_power
 from .workload import _token_ratio
 
 __all__ = [
@@ -29,9 +29,7 @@ __all__ = [
     "agentx_summary_rows",
     "aiperf_metric_rows",
     "flattened_rows",
-    "format_for_unit",
     "png_figure",
-    "power_summary_rows",
     "report_agentx_configuration",
     "report_agentx_result",
 ]
@@ -72,38 +70,8 @@ def _percent(value: Any) -> str:
     return "-" if value is None else f"{float(value) * 100:.2f}%"
 
 
-def _unit_decimals(unit: str) -> int | None:
-    """Decimal places this suite shows for *unit*: 1 for a token rate, 2 for a dollar amount."""
-    if unit.startswith("$"):
-        return 2
-    if "tok/s" in unit or "tokens/sec" in unit:
-        return 1
-    return None
-
-
-def format_for_unit(value: float, unit: str = "", significant: int | None = None) -> str:
-    """*value* rounded, halves up, to its unit's decimal places, or as :func:`format_number` shows it."""
-    places = _unit_decimals(unit)
-    if places is None:
-        return format_number(value, significant=significant)
-    rounded = Decimal(repr(float(value))).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
-    return f"{rounded:,.{places}f}"
-
-
 def _axis_value(value: float, unit: str) -> str:
     return format_for_unit(value, unit, significant=2)
-
-
-def _cell(value: Any, unit: str = "") -> str:
-    if value is None:
-        return "-"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int | float):
-        return format_for_unit(value, unit)
-    if isinstance(value, list):
-        return ", ".join(_cell(item) for item in value) or "-"
-    return str(value)
 
 
 def agentx_summary_rows(result: AgentxResult) -> list[list[str]]:
@@ -119,39 +87,39 @@ def agentx_summary_rows(result: AgentxResult) -> list[list[str]]:
         ["requests successful (aiperf)", format_number(result.successful_requests, ",d"), "requests"],
         ["requests failed (aiperf)", format_number(result.error_requests, ",d"), "requests"],
         ["error rate", _percent(result.error_rate), ""],
-        ["requests profiled (scored)", _cell(accounting.get("records_profiled")), "requests"],
-        ["warmup requests dropped", _cell(accounting.get("records_warmup_dropped")), "requests"],
+        ["requests profiled (scored)", format_cell(accounting.get("records_profiled")), "requests"],
+        ["warmup requests dropped", format_cell(accounting.get("records_warmup_dropped")), "requests"],
         ["profiling window", format_duration(throughput.get("duration_seconds")), ""],
-        ["QPS mean", _cell(_get(requests, "qps", "mean")), "req/s"],
-        ["QPS p95", _cell(_get(requests, "qps", "p95")), "req/s"],
-        ["throughput (input+output)", _cell(_get(throughput, "total", "tokens_per_second"), "tok/s"), "tok/s"],
-        ["throughput (input)", _cell(_get(throughput, "input", "tokens_per_second"), "tok/s"), "tok/s"],
-        ["throughput (output)", _cell(_get(throughput, "output", "tokens_per_second"), "tok/s"), "tok/s"],
+        ["QPS mean", format_cell(_get(requests, "qps", "mean")), "req/s"],
+        ["QPS p95", format_cell(_get(requests, "qps", "p95")), "req/s"],
+        ["throughput (input+output)", format_cell(_get(throughput, "total", "tokens_per_second"), "tok/s"), "tok/s"],
+        ["throughput (input)", format_cell(_get(throughput, "input", "tokens_per_second"), "tok/s"), "tok/s"],
+        ["throughput (output)", format_cell(_get(throughput, "output", "tokens_per_second"), "tok/s"), "tok/s"],
         [
             "throughput per GPU (input+output)",
-            _cell(_get(throughput, "per_gpu", "total_tput_tps"), "tok/s/GPU"),
+            format_cell(_get(throughput, "per_gpu", "total_tput_tps"), "tok/s/GPU"),
             "tok/s/GPU",
         ],
         [
             "throughput per GPU (input)",
-            _cell(_get(throughput, "per_gpu", "input_tput_tps"), "tok/s/GPU"),
+            format_cell(_get(throughput, "per_gpu", "input_tput_tps"), "tok/s/GPU"),
             "tok/s/GPU",
         ],
         [
             "throughput per GPU (output)",
-            _cell(_get(throughput, "per_gpu", "output_tput_tps"), "tok/s/GPU"),
+            format_cell(_get(throughput, "per_gpu", "output_tput_tps"), "tok/s/GPU"),
             "tok/s/GPU",
         ],
-        ["TTFT mean", _cell(_get(requests, "latency", "ttft", "mean")), "s"],
-        ["TTFT p95", _cell(_get(requests, "latency", "ttft", "p95")), "s"],
-        ["interactivity mean", _cell(_get(requests, "latency", "intvty", "mean"), "tok/s/user"), "tok/s/user"],
-        ["E2E latency mean", _cell(_get(requests, "latency", "e2el", "mean")), "s"],
+        ["TTFT mean", format_cell(_get(requests, "latency", "ttft", "mean")), "s"],
+        ["TTFT p95", format_cell(_get(requests, "latency", "ttft", "p95")), "s"],
+        ["interactivity mean", format_cell(_get(requests, "latency", "intvty", "mean"), "tok/s/user"), "tok/s/user"],
+        ["E2E latency mean", format_cell(_get(requests, "latency", "e2el", "mean")), "s"],
         ["theoretical prefix cache hit rate", _percent(_get(requests, "cache", "theoretical_cache_hit_rate")), ""],
         ["GPU prefix cache hit rate (server)", _percent(_get(server, "cache", "gpu_cache_hit_rate")), ""],
         ["GPU KV cache usage (server)", _percent(_get(server, "kv_cache", "gpu_usage_pct")), ""],
-        ["GPU KV cache capacity (server)", _cell(scored.get("kv_cache_pool_tokens")), "tokens"],
-        ["GPUs scored", _cell(scored.get("num_gpus")), ""],
-        ["submission valid", _cell(result.submission_valid), ""],
+        ["GPU KV cache capacity (server)", format_cell(scored.get("kv_cache_pool_tokens")), "tokens"],
+        ["GPUs scored", format_cell(scored.get("num_gpus")), ""],
+        ["submission valid", format_cell(result.submission_valid), ""],
     ]
 
 
@@ -162,7 +130,7 @@ def agentx_stat_rows(families: Mapping[str, Any], units: Mapping[str, str] | Non
         if not isinstance(stats, Mapping) or not stats:
             continue
         unit = (units or {}).get(name, "")
-        rows.append([name, unit, *(_cell(stats.get(column), unit) for column in STAT_COLUMNS)])
+        rows.append([name, unit, *(format_cell(stats.get(column), unit) for column in STAT_COLUMNS)])
     return rows
 
 
@@ -183,7 +151,7 @@ def aiperf_metric_rows(metrics: Mapping[str, Mapping[str, Any]]) -> list[list[st
         [
             name,
             str(metric.get("unit", "")),
-            *(_cell(metric.get(column), str(metric.get("unit", ""))) for column in AIPERF_STAT_COLUMNS),
+            *(format_cell(metric.get(column), str(metric.get("unit", ""))) for column in AIPERF_STAT_COLUMNS),
         ]
         for name, metric in metrics.items()
     ]
@@ -199,7 +167,7 @@ def _flatten(data: Any, prefix: str = "") -> Iterator[tuple[str, Any]]:
 
 def flattened_rows(data: Mapping[str, Any]) -> list[list[str]]:
     """A nested document as (dotted key, value) rows, leaving out what was not reported."""
-    return [[key, _cell(value)] for key, value in _flatten(data) if value not in (None, {}, [])]
+    return [[key, format_cell(value)] for key, value in _flatten(data) if value not in (None, {}, [])]
 
 
 def agentx_latency_figure(aggregate: Mapping[str, Any]) -> str:
@@ -270,8 +238,8 @@ def _report_agentx_tables(reporter, result: AgentxResult, runtime: float) -> Non
         ["measure", "value", "unit"],
         [
             *agentx_summary_rows(result),
-            ["dataset", _cell(dataset.get("loader")), ""],
-            ["aiperf version", _cell(result.aiperf_version), ""],
+            ["dataset", format_cell(dataset.get("loader")), ""],
+            ["aiperf version", format_cell(result.aiperf_version), ""],
             ["wall time (incl. dataset load and warmup)", format_duration(runtime), ""],
         ],
         title="Workload result -- AgentX",
@@ -300,10 +268,10 @@ def _report_agentx_tables(reporter, result: AgentxResult, runtime: float) -> Non
             ["count", "code", "type", "message"],
             [
                 [
-                    _cell(entry.get("count")),
-                    _cell(_get(entry, "error_details", "code")),
-                    _cell(_get(entry, "error_details", "type")),
-                    _cell(_get(entry, "error_details", "message")),
+                    format_cell(entry.get("count")),
+                    format_cell(_get(entry, "error_details", "code")),
+                    format_cell(_get(entry, "error_details", "type")),
+                    format_cell(_get(entry, "error_details", "message")),
                 ]
                 for entry in errors
             ],
@@ -367,7 +335,7 @@ POWER_INPUT_ROWS = (
 
 def _sourced(inputs: EconomicsInputs, field: str, value: Any, unit: str) -> str:
     """*value* as a cell, marked when it was probed from the system rather than configured."""
-    text = _cell(value, unit)
+    text = format_cell(value, unit)
     return f"{text} ({SYSTEM_QUERY})" if inputs.sources.get(field) == SYSTEM_QUERY else text
 
 
@@ -397,21 +365,6 @@ def agentx_economics_input_rows(inputs: EconomicsInputs) -> list[list[str]]:
     return rows
 
 
-def power_summary_rows(power: PowerSummary) -> list[list[str]]:
-    """What a power sampler measured during the run, as (measure, value, unit) rows."""
-    not_measured = "not measured"
-    no_server = power.server_unavailable or not_measured
-    return [
-        ["samples", _cell(power.samples), ""],
-        ["GPUs sampled", _cell(power.gpu_count), ""],
-        ["GPU power limit", _cell(power.gpu_limit_w), "W/GPU"],
-        ["GPU power mean", _cell(power.gpu_avg_w) if power.gpu_avg_w is not None else not_measured, "W/GPU"],
-        ["GPU power max", _cell(power.gpu_max_w) if power.gpu_max_w is not None else not_measured, "W/GPU"],
-        ["server wall power mean", _cell(power.server_avg_w) if power.server_avg_w is not None else no_server, "W"],
-        ["server wall power max", _cell(power.server_max_w) if power.server_max_w is not None else no_server, "W"],
-    ]
-
-
 def _report_agentx_economics_tables(reporter, scored: Mapping[str, Any], inputs: EconomicsInputs) -> None:
     reporter.table(
         ["input", "value", "unit", "source"],
@@ -420,8 +373,10 @@ def _report_agentx_economics_tables(reporter, scored: Mapping[str, Any], inputs:
         left={1, 2, 3},
     )
     y, x = agentx_economics(scored, inputs)
-    rows = [[label, _cell(y[key], unit), unit] for key, label, unit in ECONOMICS_METRICS]
-    rows += [[f"{label} ({DEFAULT_PERCENTILE})", _cell(x[key], unit), unit] for key, label, unit, _ in X_AXIS_METRICS]
+    rows = [[label, format_cell(y[key], unit), unit] for key, label, unit in ECONOMICS_METRICS]
+    rows += [
+        [f"{label} ({DEFAULT_PERCENTILE})", format_cell(x[key], unit), unit] for key, label, unit, _ in X_AXIS_METRICS
+    ]
     reporter.table(["metric", "value", "unit"], rows, title=ECONOMICS_TITLE, left={2})
 
 
@@ -484,12 +439,7 @@ def report_agentx_result(
         case AgentxResult() as agentx:
             reporter.note(f"AgentX artifacts: {display_path(agentx.run_dir)}")
             _report_agentx_tables(reporter, agentx, result.runtime)
-            if power is not None:
-                reporter.table(
-                    ["measure", "value", "unit"], power_summary_rows(power), title="Measured power", left={2}
-                )
-                for error in power.errors:
-                    reporter.note(f"Power reading unavailable: {error}")
+            report_power(reporter, power)
             if economics is not None and agentx.scored:
                 _report_agentx_economics_tables(reporter, agentx.scored, economics)
             _report_agentx_figures(reporter, agentx)

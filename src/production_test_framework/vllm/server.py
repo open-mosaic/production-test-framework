@@ -29,11 +29,15 @@ from ..workload.inferencex_workload import benchmark_option_argv
 from .model_fit import disk_shortfall, gpu_shortfall, model_footprint, rope_override_problem
 
 __all__ = [
+    "AMD",
     "GPU_VENDORS",
     "KV_CONNECTORS",
+    "NVIDIA",
     "ROUTER_IMAGE",
     "VLLM_IMAGE",
+    "Gpu",
     "GpuVendor",
+    "HostGpus",
     "Pool",
     "VllmDeployment",
     "VllmError",
@@ -42,6 +46,7 @@ __all__ = [
     "check_docker",
     "check_image_fits",
     "check_model_fits",
+    "detect_gpus",
     "disaggregated_workers",
     "gpu_memory",
     "hf_cache",
@@ -52,6 +57,9 @@ __all__ = [
 _log = logging.getLogger(__name__)
 
 VLLM_IMAGE = "openmosaic/mosaic-vllm:latest"
+#: vLLM's ROCm build, for AMD GPUs. Not rocm/vllm:latest (vLLM 0.32): its nixl-rocm 1.4.0 moves
+#: disaggregated KV transfers through host memory, not GPU to GPU; 0.34's nixl-rocm 1.5.0 does not.
+ROCM_VLLM_IMAGE = "vllm/vllm-openai-rocm:v0.34.0"
 
 #: vLLM's own default, for args that drop gpu_memory_utilization.
 VLLM_MEMORY_UTILIZATION = 0.9
@@ -81,6 +89,12 @@ NVIDIA_HINT = (
     "lists the GPUs."
 )
 
+AMD_HINT = (
+    "Check on the target that: amd-smi lists the GPUs (the amdgpu driver is loaded); /dev/kfd and /dev/dri "
+    "exist and this user is in the render and video groups; and docker run --rm --device /dev/kfd --device "
+    "/dev/dri rocm/rocm-terminal rocminfo lists the GPUs."
+)
+
 PULL_PROGRESS = re.compile(
     r"(Run 'docker run --help'|Unable to find image|[\w.-]+: Pulling from|[0-9a-f]{12}: (Pull complete|Already exists"
     r"|Waiting|Download complete|Verifying Checksum|Pulling fs layer|Extracting|Downloading)|Digest: |Status: )"
@@ -97,14 +111,48 @@ class VllmError(Exception):
 
 @dataclass(frozen=True)
 class GpuVendor:
-    """A GPU vendor, found by the command-line tool its driver installs."""
+    """
+    A GPU vendor: the command-line tool its driver installs, the vLLM image built for its GPUs,
+    and what to check when the GPUs cannot be used.
+    """
 
     name: str
     tool: str
-    supported: bool
+    image: str
+    hint: str
 
 
-GPU_VENDORS = (GpuVendor("NVIDIA", "nvidia-smi", supported=True), GpuVendor("AMD", "amd-smi", supported=False))
+NVIDIA = GpuVendor("NVIDIA", "nvidia-smi", VLLM_IMAGE, NVIDIA_HINT)
+AMD = GpuVendor("AMD", "amd-smi", ROCM_VLLM_IMAGE, AMD_HINT)
+
+#: In the order they are tried: a host can have a vendor's tool without its GPUs, e.g. nvidia-smi
+#: installed with no NVIDIA driver loaded, so the first whose tool lists GPUs is the host's.
+GPU_VENDORS = (NVIDIA, AMD)
+
+
+@dataclass(frozen=True)
+class Gpu:
+    index: int
+    name: str
+    memory_bytes: int
+
+
+@dataclass(frozen=True)
+class HostGpus:
+    """The GPUs on a host, and the vendor whose tool listed them."""
+
+    vendor: GpuVendor
+    gpus: tuple[Gpu, ...]
+
+    @property
+    def memory(self) -> dict[int, int]:
+        """Each GPU's memory in bytes, by index."""
+        return {gpu.index: gpu.memory_bytes for gpu in self.gpus}
+
+    @property
+    def name(self) -> str:
+        """The first GPU's name, as its vendor's tool prints it."""
+        return self.gpus[0].name
 
 
 @dataclass(frozen=True)
@@ -147,39 +195,97 @@ def serves(url: str) -> bool:
         return False
 
 
-def gpu_memory(host: Host) -> dict[int, int]:
+def _nvidia_gpus(host: Host) -> list[Gpu]:
+    listed = host.run(
+        ["nvidia-smi", "--query-gpu=index,name,memory.total", "--format=csv,noheader,nounits"], timeout=30
+    )
+    if not listed.success:
+        raise VllmError(listed.stderr or listed.stdout or f"exit status {listed.returncode}")
+    gpus = []
+    for line in listed.stdout.splitlines():
+        index, name, mib = (part.strip() for part in (line.split(",") + ["", ""])[:3])
+        if index.isdigit() and mib.isdigit():
+            gpus.append(Gpu(int(index), name, int(mib) * 1024**2))
+    return gpus
+
+
+def parse_amd_smi_json(text: str) -> list[dict[str, Any]]:
     """
-    Each GPU's memory in bytes, by index, on *host*. Raises :class:`VllmError` when no supported
-    GPU driver works there, since docker's GPU runtime cannot give vLLM the GPUs either.
+    amd-smi's ``--json`` output, one entry per GPU: amd-smi 26 wraps them in ``gpu_data``, older
+    releases print the list itself, and either may print warnings first. Raises ValueError.
+    """
+    starts = [index for index in (text.find("["), text.find("{")) if index >= 0]
+    if not starts:
+        raise ValueError("no JSON in its output")
+    data = json.loads(text[min(starts) :])
+    entries = data.get("gpu_data") if isinstance(data, dict) else data
+    if not isinstance(entries, list):
+        raise ValueError("no GPU list in its JSON")
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def amd_smi_json(host: Host, *args: str) -> list[dict[str, Any]]:
+    """``amd-smi <args> --json`` on *host*, one entry per GPU. Raises :class:`VllmError` when it fails."""
+    listed = host.run(["amd-smi", *args, "--json"], timeout=30)
+    if not listed.success:
+        raise VllmError(listed.stderr or listed.stdout or f"exit status {listed.returncode}")
+    try:
+        return parse_amd_smi_json(listed.stdout)
+    except ValueError as exc:
+        raise VllmError(f"amd-smi {' '.join(args)}: {exc}") from exc
+
+
+def amd_smi_number(value: Any) -> float | None:
+    """A number as amd-smi prints one: ``{"value": 300, "unit": "W"}``, ``"300 W"``, ``300``; None for N/A."""
+    if isinstance(value, dict):
+        value = value.get("value")
+    if isinstance(value, int | float):
+        return float(value)
+    match = re.match(r"\s*([\d.]+)", str(value or ""))
+    return float(match.group(1)) if match else None
+
+
+def _amd_gpus(host: Host) -> list[Gpu]:
+    gpus = []
+    for entry in amd_smi_json(host, "static", "--asic", "--vram"):
+        mib = amd_smi_number((entry.get("vram") or {}).get("size"))
+        if isinstance(entry.get("gpu"), int) and mib:
+            name = (entry.get("asic") or {}).get("market_name") or "AMD GPU"
+            gpus.append(Gpu(entry["gpu"], str(name), int(mib) * 1024**2))
+    return gpus
+
+
+_LISTERS = {NVIDIA.name: _nvidia_gpus, AMD.name: _amd_gpus}
+
+
+def detect_gpus(host: Host) -> HostGpus:
+    """
+    The GPUs on *host*, from the first vendor in :data:`GPU_VENDORS` whose tool is installed and
+    lists any. Raises :class:`VllmError` when none does, since docker's GPU runtime cannot give
+    vLLM the GPUs either.
     """
     where = _where(host)
-    found = [vendor for vendor in GPU_VENDORS if host.which(vendor.tool)]
-    supported = " and ".join(vendor.name for vendor in GPU_VENDORS if vendor.supported)
-    if not found:
+    installed = [vendor for vendor in GPU_VENDORS if host.which(vendor.tool)]
+    if not installed:
         tools = " nor ".join(f"{vendor.tool} ({vendor.name})" for vendor in GPU_VENDORS)
-        raise VllmError(
-            f"No GPU driver found on {where}: neither {tools} is on PATH. Install the GPU driver; vLLM is "
-            f"started on {supported} GPUs."
-        )
-    if not any(vendor.supported for vendor in found):
-        raise VllmError(
-            f"{where} has {found[0].name} GPUs ({found[0].tool} is installed), but vLLM is started only on "
-            f"{supported} GPUs for now."
-        )
-    listed = host.run(["nvidia-smi", "--query-gpu=index,memory.total", "--format=csv,noheader,nounits"], timeout=30)
-    if not listed.success:
-        problem = listed.stderr or listed.stdout or f"exit status {listed.returncode}"
-        raise VllmError(
-            f"nvidia-smi does not work on {where} ({problem}), so docker cannot give vLLM the GPUs. {NVIDIA_HINT}"
-        )
-    memory = {}
-    for line in listed.stdout.splitlines():
-        index, _, mib = line.partition(",")
-        if index.strip().isdigit() and mib.strip().isdigit():
-            memory[int(index)] = int(mib) * 1024**2
-    if not memory:
-        raise VllmError(f"nvidia-smi works but lists no GPUs on {where}. {NVIDIA_HINT}")
-    return memory
+        raise VllmError(f"No GPU driver found on {where}: neither {tools} is on PATH. Install the GPU driver.")
+    problems = []
+    for vendor in installed:
+        try:
+            gpus = _LISTERS[vendor.name](host)
+        except VllmError as exc:
+            problems.append(f"{vendor.tool} does not work on {where} ({exc}).")
+            continue
+        if gpus:
+            return HostGpus(vendor, tuple(sorted(gpus, key=lambda gpu: gpu.index)))
+        problems.append(f"{vendor.tool} works but lists no GPUs on {where}.")
+    hints = " ".join(vendor.hint for vendor in installed)
+    raise VllmError(f"{' '.join(problems)} So docker cannot give vLLM the GPUs. {hints}")
+
+
+def gpu_memory(host: Host) -> dict[int, int]:
+    """Each GPU's memory in bytes, by index, on *host*, as :func:`detect_gpus` finds them."""
+    return detect_gpus(host).memory
 
 
 def aggregated_workers(port: int | None, tensor_parallel: int, hostname: str = "localhost") -> list[VllmWorker]:
@@ -325,12 +431,30 @@ def check_model_fits(
     )
 
 
+def gpu_flags(vendor: GpuVendor, gpus: tuple[int, ...]) -> list[str]:
+    """The ``docker run`` flags that give a container *gpus*: the NVIDIA runtime's, or ROCm's devices."""
+    devices = ",".join(map(str, gpus))
+    if vendor is AMD:
+        return [
+            "--device", "/dev/kfd",
+            "--device", "/dev/dri",
+            "--group-add", "video",
+            "--security-opt", "seccomp=unconfined",
+            # ROCm's IPC (HSA_ENABLE_IPC_MODE_LEGACY=0) fails, with hipIpcGetMemHandle: invalid argument,
+            # in a second container whose processes have the same pids as the first's: share the host's.
+            "--pid", "host",
+            "--env", f"HIP_VISIBLE_DEVICES={devices}",
+        ]  # fmt: skip
+    return ["--gpus", f'"device={devices}"']
+
+
 class VllmDeployment:
     """
     vLLM containers on *host* serving *model* at *url*: *workers* from :func:`aggregated_workers`
     or :func:`disaggregated_workers`, the latter behind vLLM Router on *url*'s port. *args* are the
     ``vllm serve`` flags beyond model, port and tensor parallelism, as ``{flag_name: value}``; a
-    mapping goes as JSON. Containers are named after *name* and their logs saved to *log_dir*.
+    mapping goes as JSON. *env* is set in each vLLM container, over the image's own. Containers
+    are named after *name* and their logs saved to *log_dir*.
 
     :meth:`start` starts them and waits until *url* answers; :meth:`stop` removes them. Used as
     a context manager it does both, removing what it started if the start fails.
@@ -346,7 +470,9 @@ class VllmDeployment:
         log_dir: Path,
         args: dict[str, Any] | None = None,
         kv_transfer: str = "nixl",
-        image: str = VLLM_IMAGE,
+        vendor: GpuVendor = NVIDIA,
+        image: str | None = None,
+        env: dict[str, Any] | None = None,
         router_image: str = ROUTER_IMAGE,
         cache: str | None = None,
         hf_token: str | None = None,
@@ -360,7 +486,9 @@ class VllmDeployment:
         self.log_dir = log_dir
         self.args = args or {}
         self.kv_transfer = kv_transfer
-        self.image = image
+        self.vendor = vendor
+        self.image = image or vendor.image
+        self.env = env or {}
         self.router_image = router_image
         self.cache = cache or hf_cache(host)
         self.hf_token = hf_token
@@ -397,6 +525,7 @@ class VllmDeployment:
             "--network", "host",
             "--volume", f"{self.cache}:/root/.cache/huggingface",
             *(["--env", "HF_TOKEN"] if self.hf_token else []),
+            *(flag for key, value in self.env.items() for flag in ("--env", f"{key}={value}")),
         ]  # fmt: skip
         for worker in self.workers:
             argv = [
@@ -407,13 +536,15 @@ class VllmDeployment:
                     {key: json.dumps(value) if isinstance(value, dict) else value for key, value in self.args.items()}
                 ),
             ]  # fmt: skip
-            flags = ["--gpus", f'"device={",".join(map(str, worker.gpus))}"', *shared]
+            flags = [*gpu_flags(self.vendor, worker.gpus), *shared]
             if self.disaggregated:
                 argv += ["--kv-transfer-config", json.dumps({"kv_connector": connector, "kv_role": "kv_both"})]
                 flags += ["--env", f"VLLM_NIXL_SIDE_CHANNEL_PORT={worker.side_channel_port}"]
             name = unique_container_name(self.name if worker.role == "server" else f"{self.name}-{worker.role}")
             self.worker_containers.append(name)
-            self._run_container(name, flags, self.image, [shlex.join(argv)])
+            # openmosaic/mosaic-vllm's own entrypoint, made explicit for images without it, such as ROCm's.
+            flags += ["--entrypoint", "/bin/bash"]
+            self._run_container(name, flags, self.image, ["-c", shlex.join(argv)])
         for name, worker in zip(self.worker_containers, self.workers, strict=True):
             self._wait_until_serving(name, worker.url)
 
@@ -462,7 +593,8 @@ class VllmDeployment:
         if not started.success:
             output = (started.stderr or started.stdout).splitlines()
             error = "\n".join(line for line in output if line.strip() and not PULL_PROGRESS.match(line))
-            hint = f"\n{NVIDIA_HINT}" if "nvidia-container" in error else ""
+            known = "nvidia-container" in error or "/dev/kfd" in error or "/dev/dri" in error
+            hint = f"\n{self.vendor.hint}" if known else ""
             raise VllmError(f"docker could not start {name}: {error}{hint}")
 
     def _running(self, name: str) -> bool:
